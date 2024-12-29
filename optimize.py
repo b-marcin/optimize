@@ -519,7 +519,12 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
                 st.write(f"- **{metric}**: {formatted_value}")
 
             # Extract and display trade details
-            trades = bt.trades  # This is a DataFrame
+            # Access 'trades' after running the backtest
+            if hasattr(bt, 'trades'):
+                trades = bt.trades
+            else:
+                trades = pd.DataFrame()
+
             if not trades.empty:
                 trades_display = trades.copy()
                 trades_display['Entry Time'] = pd.to_datetime(trades_display['Entry Time'], unit='ms')
@@ -586,6 +591,7 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
             else:
                 st.info("No trades were executed for this symbol.")
 
+            all_results = best_result.copy()
             all_results["symbol"] = symbol
             global_results_list.append(all_results)
 
