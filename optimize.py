@@ -489,19 +489,34 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
             final_stats = bt.run()
 
             st.markdown("**Performance Metrics:**")
-            st.write(f"- **Best Length**: {best_result['length']}")
-            st.write(f"- **Sharpe Ratio**: {final_stats.get('Sharpe Ratio', 'N/A'):.2f}")
-            st.write(f"- **Sortino Ratio**: {final_stats.get('Sortino Ratio', 'N/A'):.2f}")
-            st.write(f"- **Calmar Ratio**: {final_stats.get('Calmar Ratio', 'N/A'):.2f}")
-            st.write(f"- **Win Rate (%)**: {final_stats.get('Win Rate [%]', 'N/A'):.2f}")
-            st.write(f"- **Profit Factor**: {final_stats.get('Profit Factor', 'N/A'):.2f}")
-            st.write(f"- **Average Trade (%)**: {final_stats.get('Avg Trade [%]', 'N/A'):.2f}")
-            st.write(f"- **Expectancy**: {final_stats.get('Expectancy', 'N/A'):.2f}")
-            st.write(f"- **Number of Trades**: {final_stats.get('Total Trades', 'N/A')}")
-            st.write(f"- **Recovery Factor**: {final_stats.get('Recovery Factor', 'N/A'):.2f}")
-            st.write(f"- **Max Drawdown (%)**: {final_stats.get('Max. Drawdown [%]', 'N/A'):.2f}")
-            st.write(f"- **Final Equity ($)**: {final_stats.get('Equity Final [$]', 'N/A'):.2f}")
-            st.write(f"- **Return (%)**: {final_stats.get('Return [%]', 'N/A'):.2f}")
+
+            # Define a helper function for safe formatting
+            def safe_format(value, decimals=2):
+                if isinstance(value, (int, float)):
+                    return f"{value:.{decimals}f}"
+                else:
+                    return value
+
+            # Display each metric with safe formatting
+            metrics = {
+                "Best Length": best_result['length'],
+                "Sharpe Ratio": final_stats.get('Sharpe Ratio', 'N/A'),
+                "Sortino Ratio": final_stats.get('Sortino Ratio', 'N/A'),
+                "Calmar Ratio": final_stats.get('Calmar Ratio', 'N/A'),
+                "Win Rate (%)": final_stats.get('Win Rate [%]', 'N/A'),
+                "Profit Factor": final_stats.get('Profit Factor', 'N/A'),
+                "Average Trade (%)": final_stats.get('Avg Trade [%]', 'N/A'),
+                "Expectancy": final_stats.get('Expectancy', 'N/A'),
+                "Number of Trades": final_stats.get('Total Trades', 'N/A'),
+                "Recovery Factor": final_stats.get('Recovery Factor', 'N/A'),
+                "Max Drawdown (%)": final_stats.get('Max. Drawdown [%]', 'N/A'),
+                "Final Equity ($)": final_stats.get('Equity Final [$]', 'N/A'),
+                "Return (%)": final_stats.get('Return [%]', 'N/A'),
+            }
+
+            for metric, value in metrics.items():
+                formatted_value = safe_format(value)
+                st.write(f"- **{metric}**: {formatted_value}")
 
             # Extract and display trade details
             trades = bt.trades  # This is a DataFrame
