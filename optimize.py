@@ -29,6 +29,7 @@ def fetch_all_historical_data(exchange_name, symbol, timeframe, max_retries=5, b
         'enableRateLimit': True,  # Enable rate limit handling
     })
     
+    # Load markets with retry logic
     attempt = 0
     while attempt < max_retries:
         try:
@@ -49,24 +50,41 @@ def fetch_all_historical_data(exchange_name, symbol, timeframe, max_retries=5, b
         st.error(f"Failed to load markets for {exchange_name} after {max_retries} attempts.")
         return None
 
-    limit = 1000
-    since = None
+    # Set the initial 'since' parameter
+    # Attempt to fetch the earliest available data by setting 'since' to 0
+    since = 0  # Start from epoch; adjust if necessary based on exchange
     all_data = []
-    st.write(f"Fetching data for {symbol} from {exchange_name}...")
+    limit = 1000  # Number of bars per API call
 
+    st.write(f"Fetching data for {symbol} from {exchange_name}...")
+    
     attempt = 0
+    max_timestamp = exchange.milliseconds()  # Current timestamp in ms to prevent fetching future data
+
     while True:
         try:
             ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
             if not ohlcv:
+                st.write(f"No more data returned for {symbol}. Finished fetching.")
                 break
+            # Append fetched data
             all_data.extend(ohlcv)
-            since = ohlcv[-1][0] + 1
             st.write(
                 f"Fetched {len(all_data)} candles for {symbol}. "
                 f"Latest date: {pd.to_datetime(ohlcv[-1][0], unit='ms')}"
             )
+            # Update 'since' to the last timestamp plus one millisecond
+            since = ohlcv[-1][0] + 1
+
+            # Safety check to prevent fetching beyond the current time
+            if since > max_timestamp:
+                st.write(f"Reached current timestamp for {symbol}.")
+                break
+
+            # Respect rate limits
             time.sleep(exchange.rateLimit / 1000)
+            # Reset retry attempt after a successful fetch
+            attempt = 0
         except ccxt.NetworkError as e:
             st.warning(f"Network error fetching data for {symbol}: {e}. Retrying in {backoff_factor ** attempt} seconds...")
             time.sleep(backoff_factor ** attempt)
@@ -86,12 +104,14 @@ def fetch_all_historical_data(exchange_name, symbol, timeframe, max_retries=5, b
         st.warning(f"No data fetched for {symbol}.")
         return None
 
+    # Convert to DataFrame
     data = pd.DataFrame(all_data, columns=["Timestamp", "Open", "High", "Low", "Close", "Volume"])
     data["Date"] = pd.to_datetime(data["Timestamp"], unit="ms")
     data.set_index("Date", inplace=True)
     data.drop(columns=["Timestamp"], inplace=True)
     data.sort_index(inplace=True)
 
+    # Validate data length
     if len(data) < 200:
         st.warning(f"Insufficient data retrieved for {symbol}. Only {len(data)} candles fetched.")
         return None
