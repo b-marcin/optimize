@@ -1,6 +1,7 @@
-streamlit
-ccxt
-pandas
-backtesting
-matplotlib
-seaborn
+streamlit>=1.20.0
+ccxt>=2.10.31
+pandas>=1.5.3
+backtesting>=0.3.2
+matplotlib>=3.7.1
+seaborn>=0.12.2
+requests>=2.28.0
