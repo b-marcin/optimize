@@ -1,5 +1,6 @@
 import streamlit as st
 import ccxt
+import ccxt.async_support as ccxt_async  # For asynchronous fetching
 import pandas as pd
 from backtesting import Backtest, Strategy
 from backtesting.lib import crossover
@@ -8,10 +9,7 @@ import warnings
 import matplotlib.pyplot as plt
 import seaborn as sns
 from io import BytesIO
-import requests
-import sys
 import asyncio
-import aiohttp
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings("ignore")
@@ -20,6 +18,52 @@ warnings.filterwarnings("ignore")
 # Helper Functions
 # -------------------------------
 
+def timeframe_to_pandas_freq(timeframe):
+    """
+    Converts a ccxt timeframe string to a Pandas frequency string.
+
+    Parameters:
+        timeframe (str): Timeframe string (e.g., '1m', '5m', '1h', '1d').
+
+    Returns:
+        str: Pandas frequency string (e.g., 'T', '5T', 'H', 'D').
+    """
+    mapping = {
+        '1m': 'T',
+        '5m': '5T',
+        '15m': '15T',
+        '30m': '30T',
+        '1h': 'H',
+        '4h': '4H',
+        '1d': 'D',
+        '1w': 'W',
+        '1M': 'M',
+    }
+    return mapping.get(timeframe, 'D')  # Default to daily if not found
+
+def verify_data_completeness(data, timeframe):
+    """
+    Verifies the completeness of the fetched data.
+
+    Parameters:
+        data (pd.DataFrame): Historical OHLCV data.
+        timeframe (str): Timeframe for OHLCV data.
+
+    Returns:
+        bool: True if data is complete, False otherwise.
+    """
+    freq = timeframe_to_pandas_freq(timeframe)
+    expected_index = pd.date_range(
+        start=data.index.min(),
+        end=data.index.max(),
+        freq=freq
+    )
+    missing = expected_index.difference(data.index)
+    if not missing.empty:
+        st.warning(f"Data has {len(missing)} missing periods.")
+        return False
+    return True
+
 def crossunder(a, b):
     """Detects crossunder between two series."""
     return a[-2] > b[-2] and a[-1] < b[-1]
@@ -27,13 +71,13 @@ def crossunder(a, b):
 def calculate_atr(high, low, close, window=14):
     """
     Calculates the Average True Range (ATR).
-    
+
     Parameters:
         high (pd.Series): High prices.
         low (pd.Series): Low prices.
         close (pd.Series): Close prices.
         window (int): Rolling window for ATR.
-    
+
     Returns:
         pd.Series: ATR values.
     """
@@ -44,13 +88,12 @@ def calculate_atr(high, low, close, window=14):
     return true_range.rolling(window=window).mean()
 
 # -------------------------------
-# Data Fetching Function
+# Asynchronous Data Fetching Functions
 # -------------------------------
 
-@st.cache_data(show_spinner=True, ttl=86400)  # Cache data for 1 day
-def fetch_all_historical_data(exchange_name, symbol, timeframe, length_max, max_retries=5, backoff_factor=2):
+async def fetch_symbol_data(exchange_name, symbol, timeframe, length_max, max_retries=5, backoff_factor=2):
     """
-    Fetches all historical OHLCV data for a given symbol from the specified exchange.
+    Asynchronously fetches all historical OHLCV data for a given symbol from the specified exchange.
 
     Parameters:
         exchange_name (str): Name of the exchange (e.g., 'binance').
@@ -63,59 +106,72 @@ def fetch_all_historical_data(exchange_name, symbol, timeframe, length_max, max_
     Returns:
         pd.DataFrame or None: DataFrame containing historical data or None if failed.
     """
-    exchange_class = getattr(ccxt, exchange_name, None)
+    exchange_class = getattr(ccxt_async, exchange_name, None)
     if exchange_class is None:
         st.error(f"Exchange '{exchange_name}' is not supported by ccxt.")
         return None
 
     exchange = exchange_class({
         'enableRateLimit': True,  # Enable rate limit handling
+        'timeout': 30000,         # Set a longer timeout if necessary
     })
 
-    # Load markets with retry logic
-    attempt = 0
-    while attempt < max_retries:
-        try:
-            st.write(f"Loading markets for {exchange_name}...")
-            exchange.load_markets()
-            break  # Exit loop if successful
-        except ccxt.NetworkError as e:
-            st.warning(f"Network error while loading markets: {e}. Retrying in {backoff_factor ** attempt} seconds...")
-        except ccxt.ExchangeError as e:
-            st.error(f"Exchange error while loading markets: {e}.")
-            return None
-        except Exception as e:
-            st.error(f"Unexpected error while loading markets: {e}.")
-            return None
-        attempt += 1
-        time.sleep(backoff_factor ** attempt)
-    else:
-        st.error(f"Failed to load markets for {exchange_name} after {max_retries} attempts.")
-        return None
-
-    # Set the initial 'since' parameter
-    since = 0  # Start from epoch; adjust if necessary based on exchange
     all_data = []
     limit = 1000  # Number of bars per API call
 
-    st.write(f"Fetching data for {symbol} from {exchange_name}...")
+    try:
+        st.write(f"Loading markets for {exchange_name}...")
+        await exchange.load_markets()
+    except ccxt_async.NetworkError as e:
+        st.error(f"Network error while loading markets for {symbol}: {e}")
+        await exchange.close()
+        return None
+    except ccxt_async.ExchangeError as e:
+        st.error(f"Exchange error while loading markets for {symbol}: {e}")
+        await exchange.close()
+        return None
+    except Exception as e:
+        st.error(f"Unexpected error while loading markets for {symbol}: {e}")
+        await exchange.close()
+        return None
+
+    # Verify if the symbol exists on the exchange
+    if symbol not in exchange.symbols:
+        st.error(f"Symbol '{symbol}' not found on exchange '{exchange_name}'.")
+        await exchange.close()
+        return None
+
+    # Determine the earliest possible 'since' timestamp
+    # For simplicity, we'll set a default start date (e.g., January 1, 2017)
+    start_date = exchange.parse8601('2017-01-01T00:00:00Z')
+    since = start_date
 
     # Get current timestamp in ms to prevent fetching future data
     max_timestamp = exchange.milliseconds()
 
+    st.write(f"Fetching data for {symbol} from {exchange_name}...")
+
+    attempt = 0  # Initialize attempt counter
+
     while True:
         try:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+            ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
             if not ohlcv:
                 st.write(f"No more data returned for {symbol}. Finished fetching.")
                 break
-            # Append fetched data
+
+            # Check for duplicates or overlapping data
+            if all_data and ohlcv[0][0] <= all_data[-1][0]:
+                st.warning(f"Duplicate or overlapping data detected for {symbol}.")
+                break
+
             all_data.extend(ohlcv)
             latest_timestamp = ohlcv[-1][0]
             st.write(
                 f"Fetched {len(all_data)} candles for {symbol}. "
                 f"Latest date: {pd.to_datetime(latest_timestamp, unit='ms')}"
             )
+
             # Update 'since' to the last timestamp plus one millisecond
             since = latest_timestamp + 1
 
@@ -125,21 +181,27 @@ def fetch_all_historical_data(exchange_name, symbol, timeframe, length_max, max_
                 break
 
             # Respect rate limits
-            time.sleep(exchange.rateLimit / 1000)
-        except ccxt.NetworkError as e:
+            await asyncio.sleep(exchange.rateLimit / 1000)
+
+        except ccxt_async.NetworkError as e:
             st.warning(f"Network error fetching data for {symbol}: {e}. Retrying in {backoff_factor ** attempt} seconds...")
-            time.sleep(backoff_factor ** attempt)
             attempt += 1
             if attempt >= max_retries:
                 st.error(f"Failed to fetch data for {symbol} after {max_retries} attempts.")
+                await exchange.close()
                 return None
+            await asyncio.sleep(backoff_factor ** attempt)
             continue
-        except ccxt.ExchangeError as e:
+        except ccxt_async.ExchangeError as e:
             st.error(f"Exchange error fetching data for {symbol}: {e}. Skipping symbol.")
+            await exchange.close()
             return None
         except Exception as e:
             st.error(f"Unexpected error fetching data for {symbol}: {e}. Skipping symbol.")
+            await exchange.close()
             return None
+
+    await exchange.close()
 
     if not all_data:
         st.warning(f"No data fetched for {symbol}.")
@@ -152,6 +214,10 @@ def fetch_all_historical_data(exchange_name, symbol, timeframe, length_max, max_
     data.drop(columns=["Timestamp"], inplace=True)
     data.sort_index(inplace=True)
 
+    # Verify data completeness
+    if not verify_data_completeness(data, timeframe):
+        st.warning(f"There are missing data points for {symbol}.")
+
     # Validate data length
     required_length = (length_max * 2) + 10  # window_atr = 2 × length_max + buffer
     if len(data) < required_length:
@@ -162,6 +228,61 @@ def fetch_all_historical_data(exchange_name, symbol, timeframe, length_max, max_
         return None
 
     return data
+
+async def fetch_all_symbols_data(exchange_name, symbols, timeframe, length_max):
+    """
+    Asynchronously fetches data for all symbols concurrently.
+
+    Parameters:
+        exchange_name (str): Name of the exchange.
+        symbols (list): List of trading pair symbols.
+        timeframe (str): Timeframe for OHLCV data.
+        length_max (int): Maximum length parameter.
+
+    Returns:
+        list: List of DataFrames or None for each symbol.
+    """
+    tasks = [fetch_symbol_data(exchange_name, symbol, timeframe, length_max) for symbol in symbols]
+    return await asyncio.gather(*tasks)
+
+def run_concurrent_fetch(exchange_name, symbols, timeframe, length_max):
+    """
+    Runs the asynchronous fetching of all symbols data.
+
+    Parameters:
+        exchange_name (str): Name of the exchange.
+        symbols (list): List of trading pair symbols.
+        timeframe (str): Timeframe for OHLCV data.
+        length_max (int): Maximum length parameter.
+
+    Returns:
+        list: List of DataFrames or None for each symbol.
+    """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    data_list = loop.run_until_complete(fetch_all_symbols_data(exchange_name, symbols, timeframe, length_max))
+    loop.close()
+    return data_list
+
+# -------------------------------
+# Data Fetching Function with Caching
+# -------------------------------
+
+@st.cache_data(show_spinner=True, ttl=86400)  # Cache data for 1 day
+def fetch_all_historical_data_cached(exchange_name, symbols, timeframe, length_max):
+    """
+    Cached function to fetch historical data for all symbols.
+
+    Parameters:
+        exchange_name (str): Name of the exchange.
+        symbols (list): List of trading pair symbols.
+        timeframe (str): Timeframe for OHLCV data.
+        length_max (int): Maximum length parameter.
+
+    Returns:
+        list: List of DataFrames or None for each symbol.
+    """
+    return run_concurrent_fetch(exchange_name, symbols, timeframe, length_max)
 
 # -------------------------------
 # Trading Strategy Class
@@ -312,10 +433,14 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
     progress_bar = st.progress(0)
     symbol_counter = 0
 
-    for symbol in symbols:
+    # Fetch all data concurrently
+    st.write("Fetching data for all symbols...")
+    data_list = fetch_all_historical_data_cached(exchange_name, symbols, timeframe, length_max)
+
+    for idx, symbol in enumerate(symbols):
         symbol_counter += 1
         st.subheader(f"Processing {symbol}...")
-        data = fetch_all_historical_data(exchange_name, symbol, timeframe, length_max)
+        data = data_list[idx]
         if data is None:
             st.warning(f"Skipping {symbol} due to insufficient data or errors.\n")
             progress_bar.progress(symbol_counter / total_symbols)
@@ -398,7 +523,7 @@ def main():
     # Timeframe Selection
     timeframe = st.sidebar.selectbox(
         "Select Timeframe",
-        ["1m", "5m", "15m", "1h", "4h", "1d"]
+        ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
     )
 
     # Length Range Slider (Extended to 1000)
