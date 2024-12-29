@@ -3,7 +3,7 @@ import ccxt
 import ccxt.async_support as ccxt_async  # For asynchronous fetching
 import pandas as pd
 from backtesting import Backtest, Strategy
-from backtesting.lib import crossover
+from backtesting.lib import crossover, crossunder
 import time
 import warnings
 import matplotlib.pyplot as plt
@@ -349,24 +349,43 @@ def exhaustive_search(data, length_range):
         )
         stats = bt.run()
 
-        sharpe = stats["Sharpe Ratio"]
-        sortino = stats["Sortino Ratio"]
-        calmar = stats["Calmar Ratio"]
+        # Extract additional metrics if available
+        sharpe = stats.get("Sharpe Ratio", None)
+        sortino = stats.get("Sortino Ratio", None)
+        calmar = stats.get("Calmar Ratio", None)
+        win_rate = stats.get("Win Rate [%]", None)
+        profit_factor = stats.get("Profit Factor", None)
+        avg_trade = stats.get("Avg Trade [%]", None)
+        expectancy = stats.get("Expectancy", None)
+        number_of_trades = stats.get("Total Trades", None)
+        recovery_factor = stats.get("Recovery Factor", None)
 
+        # Ensure essential metrics are present
         if pd.isna(sharpe) or pd.isna(sortino) or pd.isna(calmar):
             continue
 
-        combined_score = sharpe * 0.4 + sortino * 0.4 + calmar * 0.2
+        # Calculate combined score with weights
+        combined_score = sharpe * 0.3 + sortino * 0.3 + calmar * 0.2
+        if profit_factor:
+            combined_score += (profit_factor - 1) * 0.1  # Assuming profit_factor >1 is good
+        if expectancy:
+            combined_score += expectancy * 0.1
 
         results.append({
             "length": length,
             "sharpe": sharpe,
             "sortino": sortino,
             "calmar": calmar,
+            "win_rate": win_rate,
+            "profit_factor": profit_factor,
+            "avg_trade": avg_trade,
+            "expectancy": expectancy,
+            "number_of_trades": number_of_trades,
+            "recovery_factor": recovery_factor,
             "combined_score": combined_score,
-            "final_equity": stats["Equity Final [$]"],
-            "return": stats["Return [%]"],
-            "max_drawdown": stats["Max. Drawdown [%]"],
+            "final_equity": stats.get("Equity Final [$]", None),
+            "return": stats.get("Return [%]", None),
+            "max_drawdown": stats.get("Max. Drawdown [%]", None),
         })
 
     results_df = pd.DataFrame(results)
@@ -471,12 +490,86 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
 
             st.markdown("**Performance Metrics:**")
             st.write(f"- **Best Length**: {best_result['length']}")
-            st.write(f"- **Sharpe Ratio**: {final_stats['Sharpe Ratio']:.2f}")
-            st.write(f"- **Sortino Ratio**: {final_stats['Sortino Ratio']:.2f}")
-            st.write(f"- **Calmar Ratio**: {final_stats['Calmar Ratio']:.2f}")
-            st.write(f"- **Max Drawdown (%)**: {final_stats['Max. Drawdown [%]']:.2f}")
-            st.write(f"- **Final Equity ($)**: {final_stats['Equity Final [$]']:.2f}")
-            st.write(f"- **Return (%)**: {final_stats['Return [%]']:.2f}")
+            st.write(f"- **Sharpe Ratio**: {final_stats.get('Sharpe Ratio', 'N/A'):.2f}")
+            st.write(f"- **Sortino Ratio**: {final_stats.get('Sortino Ratio', 'N/A'):.2f}")
+            st.write(f"- **Calmar Ratio**: {final_stats.get('Calmar Ratio', 'N/A'):.2f}")
+            st.write(f"- **Win Rate (%)**: {final_stats.get('Win Rate [%]', 'N/A'):.2f}")
+            st.write(f"- **Profit Factor**: {final_stats.get('Profit Factor', 'N/A'):.2f}")
+            st.write(f"- **Average Trade (%)**: {final_stats.get('Avg Trade [%]', 'N/A'):.2f}")
+            st.write(f"- **Expectancy**: {final_stats.get('Expectancy', 'N/A'):.2f}")
+            st.write(f"- **Number of Trades**: {final_stats.get('Total Trades', 'N/A')}")
+            st.write(f"- **Recovery Factor**: {final_stats.get('Recovery Factor', 'N/A'):.2f}")
+            st.write(f"- **Max Drawdown (%)**: {final_stats.get('Max. Drawdown [%]', 'N/A'):.2f}")
+            st.write(f"- **Final Equity ($)**: {final_stats.get('Equity Final [$]', 'N/A'):.2f}")
+            st.write(f"- **Return (%)**: {final_stats.get('Return [%]', 'N/A'):.2f}")
+
+            # Extract and display trade details
+            trades = bt.trades  # This is a DataFrame
+            if not trades.empty:
+                trades_display = trades.copy()
+                trades_display['Entry Time'] = pd.to_datetime(trades_display['Entry Time'], unit='ms')
+                trades_display['Exit Time'] = pd.to_datetime(trades_display['Exit Time'], unit='ms')
+                trades_display['Profit (%)'] = trades_display['Profit (%)'].round(2)
+                trades_display['Return (%)'] = trades_display['Return [%]'].round(2)
+                trades_display = trades_display[[
+                    'Entry Time', 'Exit Time', 'Size', 'Entry Price', 'Exit Price',
+                    'Profit (%)', 'Return (%)'
+                ]]
+                trades_display.rename(columns={
+                    'Size': 'Position Size',
+                    'Entry Price': 'Buy Price',
+                    'Exit Price': 'Sell Price'
+                }, inplace=True)
+
+                # Display aggregated statistics
+                st.markdown("**Aggregated Trade Statistics:**")
+                total_trades = len(trades_display)
+                profitable_trades = len(trades_display[trades_display['Profit (%)'] > 0])
+                losing_trades = len(trades_display[trades_display['Profit (%)'] <= 0])
+                total_profit = trades_display['Profit (%)'].sum()
+                average_profit = trades_display['Profit (%)'].mean()
+                average_loss = trades_display[trades_display['Profit (%)'] < 0]['Profit (%)'].mean()
+                profit_factor = final_stats.get("Profit Factor", "N/A")
+                expectancy = final_stats.get("Expectancy", "N/A")
+
+                st.write(f"- **Total Trades**: {total_trades}")
+                st.write(f"- **Profitable Trades**: {profitable_trades} ({(profitable_trades/total_trades*100):.2f}%)")
+                st.write(f"- **Losing Trades**: {losing_trades} ({(losing_trades/total_trades*100):.2f}%)")
+                st.write(f"- **Total Profit (%)**: {total_profit:.2f}%")
+                st.write(f"- **Average Profit per Trade (%)**: {average_profit:.2f}%")
+                st.write(f"- **Average Loss per Trade (%)**: {average_loss:.2f}%")
+                st.write(f"- **Profit Factor**: {profit_factor}")
+                st.write(f"- **Expectancy**: {expectancy:.2f}")
+
+                st.markdown("**Trade Log:**")
+
+                # Apply conditional formatting
+                def highlight_profits(row):
+                    if row['Profit (%)'] > 0:
+                        color = 'background-color: #d4edda'  # Light green
+                    elif row['Profit (%)'] < 0:
+                        color = 'background-color: #f8d7da'  # Light red
+                    else:
+                        color = ''
+                    return [color] * len(row)
+
+                styled_trades = trades_display.style.apply(highlight_profits, axis=1)
+
+                # Convert styled DataFrame to HTML
+                trades_html = styled_trades.render()
+
+                st.markdown(trades_html, unsafe_allow_html=True)
+
+                # Enable CSV download of trades
+                trades_csv = trades_display.to_csv(index=False)
+                st.download_button(
+                    label="Download Trades CSV",
+                    data=trades_csv,
+                    file_name=f"{symbol.replace('/', '')}_trades.csv",
+                    mime="text/csv",
+                )
+            else:
+                st.info("No trades were executed for this symbol.")
 
             all_results["symbol"] = symbol
             global_results_list.append(all_results)
