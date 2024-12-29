@@ -3,7 +3,7 @@ import ccxt
 import ccxt.async_support as ccxt_async  # For asynchronous fetching
 import pandas as pd
 from backtesting import Backtest, Strategy
-from backtesting.lib import crossover, crossunder
+from backtesting.lib import crossover  # Removed crossunder import
 import time
 import warnings
 import matplotlib.pyplot as plt
@@ -366,7 +366,7 @@ def exhaustive_search(data, length_range):
 
         # Calculate combined score with weights
         combined_score = sharpe * 0.3 + sortino * 0.3 + calmar * 0.2
-        if profit_factor:
+        if profit_factor and profit_factor > 1:
             combined_score += (profit_factor - 1) * 0.1  # Assuming profit_factor >1 is good
         if expectancy:
             combined_score += expectancy * 0.1
