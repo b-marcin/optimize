@@ -634,18 +634,26 @@ def main():
         ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
     )
 
-    # Length Range Slider (Extended to 1000)
-    length_min, length_max = st.sidebar.slider(
-        "Select Length Range",
-        min_value=10,
-        max_value=1000,  # Increased max value from 200 to 1000
-        value=(10, 200)
-    )
-    length_range = range(length_min, length_max + 1)
+    # Process All Lengths Checkbox
+    process_all = st.sidebar.checkbox("Process All Lengths (10-1000)")
+
+    if not process_all:
+        # Length Range Slider
+        length_min, length_max = st.sidebar.slider(
+            "Select Length Range",
+            min_value=10,
+            max_value=1000,  # Increased max value from 200 to 1000
+            value=(10, 200)
+        )
+        length_range = range(length_min, length_max + 1)
+    else:
+        # Set to entire possible range
+        st.sidebar.info("Processing all lengths from 10 to 1000. This may take some time.")
+        length_range = range(10, 1001)
 
     # Run Backtest Button
     if st.sidebar.button("🚀 Run Backtest"):
-        run_backtest(exchange_name, symbols, timeframe, length_range, length_max)
+        run_backtest(exchange_name, symbols, timeframe, length_range, length_max=1000)
 
 # -------------------------------
 # Entry Point
