@@ -10,25 +10,68 @@ import seaborn as sns
 from io import BytesIO
 import requests
 import sys
+import asyncio
+import aiohttp
 
+# Suppress warnings for cleaner output
 warnings.filterwarnings("ignore")
 
-# Define helper functions
+# -------------------------------
+# Helper Functions
+# -------------------------------
+
 def crossunder(a, b):
+    """Detects crossunder between two series."""
     return a[-2] > b[-2] and a[-1] < b[-1]
 
 def calculate_atr(high, low, close, window=14):
+    """
+    Calculates the Average True Range (ATR).
+    
+    Parameters:
+        high (pd.Series): High prices.
+        low (pd.Series): Low prices.
+        close (pd.Series): Close prices.
+        window (int): Rolling window for ATR.
+    
+    Returns:
+        pd.Series: ATR values.
+    """
     high_low = high - low
     high_close = abs(high - close.shift())
     low_close = abs(low - close.shift())
     true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     return true_range.rolling(window=window).mean()
 
-def fetch_all_historical_data(exchange_name, symbol, timeframe, max_retries=5, backoff_factor=2):
-    exchange = getattr(ccxt, exchange_name)({
+# -------------------------------
+# Data Fetching Function
+# -------------------------------
+
+@st.cache_data(show_spinner=True, ttl=86400)  # Cache data for 1 day
+def fetch_all_historical_data(exchange_name, symbol, timeframe, length_max, max_retries=5, backoff_factor=2):
+    """
+    Fetches all historical OHLCV data for a given symbol from the specified exchange.
+
+    Parameters:
+        exchange_name (str): Name of the exchange (e.g., 'binance').
+        symbol (str): Trading pair symbol (e.g., 'BTC/USDT').
+        timeframe (str): Timeframe for OHLCV data (e.g., '1d').
+        length_max (int): Maximum length parameter to determine data requirements.
+        max_retries (int): Maximum number of retry attempts for network/exchange errors.
+        backoff_factor (int): Factor for exponential backoff between retries.
+
+    Returns:
+        pd.DataFrame or None: DataFrame containing historical data or None if failed.
+    """
+    exchange_class = getattr(ccxt, exchange_name, None)
+    if exchange_class is None:
+        st.error(f"Exchange '{exchange_name}' is not supported by ccxt.")
+        return None
+
+    exchange = exchange_class({
         'enableRateLimit': True,  # Enable rate limit handling
     })
-    
+
     # Load markets with retry logic
     attempt = 0
     while attempt < max_retries:
@@ -51,15 +94,14 @@ def fetch_all_historical_data(exchange_name, symbol, timeframe, max_retries=5, b
         return None
 
     # Set the initial 'since' parameter
-    # Attempt to fetch the earliest available data by setting 'since' to 0
     since = 0  # Start from epoch; adjust if necessary based on exchange
     all_data = []
     limit = 1000  # Number of bars per API call
 
     st.write(f"Fetching data for {symbol} from {exchange_name}...")
-    
-    attempt = 0
-    max_timestamp = exchange.milliseconds()  # Current timestamp in ms to prevent fetching future data
+
+    # Get current timestamp in ms to prevent fetching future data
+    max_timestamp = exchange.milliseconds()
 
     while True:
         try:
@@ -69,12 +111,13 @@ def fetch_all_historical_data(exchange_name, symbol, timeframe, max_retries=5, b
                 break
             # Append fetched data
             all_data.extend(ohlcv)
+            latest_timestamp = ohlcv[-1][0]
             st.write(
                 f"Fetched {len(all_data)} candles for {symbol}. "
-                f"Latest date: {pd.to_datetime(ohlcv[-1][0], unit='ms')}"
+                f"Latest date: {pd.to_datetime(latest_timestamp, unit='ms')}"
             )
             # Update 'since' to the last timestamp plus one millisecond
-            since = ohlcv[-1][0] + 1
+            since = latest_timestamp + 1
 
             # Safety check to prevent fetching beyond the current time
             if since > max_timestamp:
@@ -83,8 +126,6 @@ def fetch_all_historical_data(exchange_name, symbol, timeframe, max_retries=5, b
 
             # Respect rate limits
             time.sleep(exchange.rateLimit / 1000)
-            # Reset retry attempt after a successful fetch
-            attempt = 0
         except ccxt.NetworkError as e:
             st.warning(f"Network error fetching data for {symbol}: {e}. Retrying in {backoff_factor ** attempt} seconds...")
             time.sleep(backoff_factor ** attempt)
@@ -112,29 +153,40 @@ def fetch_all_historical_data(exchange_name, symbol, timeframe, max_retries=5, b
     data.sort_index(inplace=True)
 
     # Validate data length
-    if len(data) < 200:
-        st.warning(f"Insufficient data retrieved for {symbol}. Only {len(data)} candles fetched.")
+    required_length = (length_max * 2) + 10  # window_atr = 2 × length_max + buffer
+    if len(data) < required_length:
+        st.warning(
+            f"Insufficient data retrieved for {symbol}. "
+            f"Only {len(data)} candles fetched, which is less than the required {required_length}."
+        )
         return None
 
     return data
 
-# Define the trading strategy
+# -------------------------------
+# Trading Strategy Class
+# -------------------------------
+
 class TrendStrategy(Strategy):
+    """
+    A trend-following strategy based on SMA and ATR.
+    """
     atr_multiplier = 0.8
     length = 10
 
     def init(self):
         high = pd.Series(self.data.High)
-        low  = pd.Series(self.data.Low)
+        low = pd.Series(self.data.Low)
         close = pd.Series(self.data.Close)
 
-        window_atr = int(200)
+        # Dynamic ATR window based on the current 'length'
+        window_atr = int(self.length * 2)  # Example: ATR window = 2 × length
         atr = calculate_atr(high, low, close, window=window_atr)
         atr_adjusted = atr * self.atr_multiplier
 
         window_len = int(self.length)
         sma_high = high.rolling(window=window_len).mean() + atr_adjusted
-        sma_low  = low.rolling(window=window_len).mean() - atr_adjusted
+        sma_low = low.rolling(window=window_len).mean() - atr_adjusted
 
         self.sma_high = self.I(lambda: sma_high)
         self.sma_low = self.I(lambda: sma_low)
@@ -148,7 +200,21 @@ class TrendStrategy(Strategy):
         elif crossunder(self.data.Close, self.sma_low):
             self.sell(size=0.1)
 
+# -------------------------------
+# Exhaustive Search Function
+# -------------------------------
+
 def exhaustive_search(data, length_range):
+    """
+    Performs exhaustive search over a range of 'length' parameters to find the best strategy.
+
+    Parameters:
+        data (pd.DataFrame): Historical OHLCV data.
+        length_range (range): Range of 'length' parameters to test.
+
+    Returns:
+        tuple: Best result as a Series and all results as a DataFrame.
+    """
     results = []
 
     for length in length_range:
@@ -165,6 +231,7 @@ def exhaustive_search(data, length_range):
         sharpe = stats["Sharpe Ratio"]
         sortino = stats["Sortino Ratio"]
         calmar = stats["Calmar Ratio"]
+
         if pd.isna(sharpe) or pd.isna(sortino) or pd.isna(calmar):
             continue
 
@@ -188,7 +255,17 @@ def exhaustive_search(data, length_range):
     best_result = results_df.loc[results_df["combined_score"].idxmax()]
     return best_result, results_df
 
+# -------------------------------
+# Plotting Function
+# -------------------------------
+
 def plot_global_results(global_results_df):
+    """
+    Plots the average combined score by length across all symbols.
+
+    Parameters:
+        global_results_df (pd.DataFrame): DataFrame containing all backtest results.
+    """
     grouped = global_results_df.groupby("length", as_index=False)["combined_score"].mean()
     grouped.rename(columns={"combined_score": "avg_combined_score"}, inplace=True)
     best_idx = grouped["avg_combined_score"].idxmax()
@@ -197,7 +274,7 @@ def plot_global_results(global_results_df):
 
     st.write("\n## Global Best Length")
     st.write(f"**Best Length (Avg across all assets)** = {best_length}")
-    st.write(f"**Average Combined Score at best length** = {best_score:.2f}")
+    st.write(f"**Average Combined Score at Best Length** = {best_score:.2f}")
 
     plt.figure(figsize=(10, 6))
     sns.lineplot(data=grouped, x="length", y="avg_combined_score", marker="o")
@@ -208,54 +285,40 @@ def plot_global_results(global_results_df):
     plt.legend()
     plt.tight_layout()
 
-    # Convert plot to bytes
+    # Convert plot to bytes and display
     buf = BytesIO()
     plt.savefig(buf, format="png")
     plt.close()
     buf.seek(0)
     st.image(buf, caption="Average Combined Score by Length")
 
-# Streamlit App
-def main():
-    st.title("Crypto Backtesting Tool")
+# -------------------------------
+# Backtesting Function
+# -------------------------------
 
-    st.sidebar.header("Configuration")
+def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
+    """
+    Runs backtests for all specified symbols and aggregates the results.
 
-    exchange_name = st.sidebar.selectbox(
-        "Select Exchange",
-        ["binance", "kraken", "bitfinex", "coinbasepro"]
-    )
-
-    symbols_input = st.sidebar.text_input(
-        "Enter Symbols (comma-separated, e.g., BTC/USDT,ETH/USDT)",
-        "BTC/USDT,ETH/USDT,XRP/USDT,SOL/USDT,DOT/USDT,AVAX/USDT,ARB/USDT,UNI/USDT,SUI/USDT"
-    )
-    symbols = [symbol.strip().upper() for symbol in symbols_input.split(",")]
-
-    timeframe = st.sidebar.selectbox(
-        "Select Timeframe",
-        ["1m", "5m", "15m", "1h", "4h", "1d"]
-    )
-
-    length_min, length_max = st.sidebar.slider(
-        "Select Length Range",
-        min_value=10,
-        max_value=200,
-        value=(10, 200)
-    )
-    length_range = range(length_min, length_max + 1)
-
-    if st.sidebar.button("Run Backtest"):
-        run_backtest(exchange_name, symbols, timeframe, length_range)
-
-def run_backtest(exchange_name, symbols, timeframe, length_range):
+    Parameters:
+        exchange_name (str): Name of the exchange.
+        symbols (list): List of trading pair symbols.
+        timeframe (str): Timeframe for OHLCV data.
+        length_range (range): Range of 'length' parameters to test.
+        length_max (int): Maximum 'length' parameter value.
+    """
     global_results_list = []
+    total_symbols = len(symbols)
+    progress_bar = st.progress(0)
+    symbol_counter = 0
 
     for symbol in symbols:
+        symbol_counter += 1
         st.subheader(f"Processing {symbol}...")
-        data = fetch_all_historical_data(exchange_name, symbol, timeframe)
+        data = fetch_all_historical_data(exchange_name, symbol, timeframe, length_max)
         if data is None:
             st.warning(f"Skipping {symbol} due to insufficient data or errors.\n")
+            progress_bar.progress(symbol_counter / total_symbols)
             continue
 
         st.write("Analyzing all 'length' parameters...")
@@ -270,6 +333,7 @@ def run_backtest(exchange_name, symbols, timeframe, length_range):
             )
             st.write(f"Results for {symbol} saved to CSV.")
 
+            # Set the best length and run the final backtest
             TrendStrategy.length = best_result["length"]
             bt = Backtest(
                 data,
@@ -297,11 +361,62 @@ def run_backtest(exchange_name, symbols, timeframe, length_range):
         except Exception as e:
             st.error(f"An unexpected error occurred while processing {symbol}: {e}")
 
+        # Update progress bar
+        progress_bar.progress(symbol_counter / total_symbols)
+
     if global_results_list:
         global_results_df = pd.concat(global_results_list, ignore_index=True)
         plot_global_results(global_results_df)
     else:
         st.error("No results to plot. All symbols skipped or had no valid trades.")
+
+# -------------------------------
+# Streamlit App
+# -------------------------------
+
+def main():
+    """
+    Main function to run the Streamlit app.
+    """
+    st.title("📈 Crypto Backtesting Tool")
+
+    st.sidebar.header("🔧 Configuration")
+
+    # Exchange Selection
+    exchange_name = st.sidebar.selectbox(
+        "Select Exchange",
+        ["binance", "kraken", "bitfinex", "coinbasepro"]
+    )
+
+    # Symbols Input
+    symbols_input = st.sidebar.text_input(
+        "Enter Symbols (comma-separated, e.g., BTC/USDT,ETH/USDT)",
+        "BTC/USDT,ETH/USDT,XRP/USDT,SOL/USDT,DOT/USDT,AVAX/USDT,ARB/USDT,UNI/USDT,SUI/USDT"
+    )
+    symbols = [symbol.strip().upper() for symbol in symbols_input.split(",")]
+
+    # Timeframe Selection
+    timeframe = st.sidebar.selectbox(
+        "Select Timeframe",
+        ["1m", "5m", "15m", "1h", "4h", "1d"]
+    )
+
+    # Length Range Slider (Extended to 1000)
+    length_min, length_max = st.sidebar.slider(
+        "Select Length Range",
+        min_value=10,
+        max_value=1000,  # Increased max value from 200 to 1000
+        value=(10, 200)
+    )
+    length_range = range(length_min, length_max + 1)
+
+    # Run Backtest Button
+    if st.sidebar.button("🚀 Run Backtest"):
+        run_backtest(exchange_name, symbols, timeframe, length_range, length_max)
+
+# -------------------------------
+# Entry Point
+# -------------------------------
 
 if __name__ == "__main__":
     main()
