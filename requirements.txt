@@ -1,7 +1,7 @@
-streamlit
-ccxt
-pandas
 backtesting
+ccxt
 matplotlib
-seaborn
+pandas
 requests
+seaborn
+streamlit
