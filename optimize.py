@@ -8,6 +8,8 @@ import warnings
 import matplotlib.pyplot as plt
 import seaborn as sns
 from io import BytesIO
+import requests
+import sys
 
 warnings.filterwarnings("ignore")
 
@@ -22,14 +24,37 @@ def calculate_atr(high, low, close, window=14):
     true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     return true_range.rolling(window=window).mean()
 
-def fetch_all_historical_data(exchange_name, symbol, timeframe):
-    exchange = getattr(ccxt, exchange_name)()
-    exchange.load_markets()
+def fetch_all_historical_data(exchange_name, symbol, timeframe, max_retries=5, backoff_factor=2):
+    exchange = getattr(ccxt, exchange_name)({
+        'enableRateLimit': True,  # Enable rate limit handling
+    })
+    
+    attempt = 0
+    while attempt < max_retries:
+        try:
+            st.write(f"Loading markets for {exchange_name}...")
+            exchange.load_markets()
+            break  # Exit loop if successful
+        except ccxt.NetworkError as e:
+            st.warning(f"Network error while loading markets: {e}. Retrying in {backoff_factor ** attempt} seconds...")
+        except ccxt.ExchangeError as e:
+            st.error(f"Exchange error while loading markets: {e}.")
+            return None
+        except Exception as e:
+            st.error(f"Unexpected error while loading markets: {e}.")
+            return None
+        attempt += 1
+        time.sleep(backoff_factor ** attempt)
+    else:
+        st.error(f"Failed to load markets for {exchange_name} after {max_retries} attempts.")
+        return None
+
     limit = 1000
     since = None
     all_data = []
     st.write(f"Fetching data for {symbol} from {exchange_name}...")
 
+    attempt = 0
     while True:
         try:
             ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
@@ -43,12 +68,23 @@ def fetch_all_historical_data(exchange_name, symbol, timeframe):
             )
             time.sleep(exchange.rateLimit / 1000)
         except ccxt.NetworkError as e:
-            st.warning(f"Network error fetching data for {symbol}: {e}. Retrying in 5 seconds...")
-            time.sleep(5)
+            st.warning(f"Network error fetching data for {symbol}: {e}. Retrying in {backoff_factor ** attempt} seconds...")
+            time.sleep(backoff_factor ** attempt)
+            attempt += 1
+            if attempt >= max_retries:
+                st.error(f"Failed to fetch data for {symbol} after {max_retries} attempts.")
+                return None
             continue
+        except ccxt.ExchangeError as e:
+            st.error(f"Exchange error fetching data for {symbol}: {e}. Skipping symbol.")
+            return None
         except Exception as e:
             st.error(f"Unexpected error fetching data for {symbol}: {e}. Skipping symbol.")
             return None
+
+    if not all_data:
+        st.warning(f"No data fetched for {symbol}.")
+        return None
 
     data = pd.DataFrame(all_data, columns=["Timestamp", "Open", "High", "Low", "Close", "Volume"])
     data["Date"] = pd.to_datetime(data["Timestamp"], unit="ms")
@@ -199,7 +235,7 @@ def run_backtest(exchange_name, symbols, timeframe, length_range):
         st.subheader(f"Processing {symbol}...")
         data = fetch_all_historical_data(exchange_name, symbol, timeframe)
         if data is None:
-            st.warning(f"Skipping {symbol} due to insufficient data.\n")
+            st.warning(f"Skipping {symbol} due to insufficient data or errors.\n")
             continue
 
         st.write("Analyzing all 'length' parameters...")
@@ -238,6 +274,8 @@ def run_backtest(exchange_name, symbols, timeframe, length_range):
 
         except ValueError as ve:
             st.error(f"No valid results found for {symbol}: {ve}")
+        except Exception as e:
+            st.error(f"An unexpected error occurred while processing {symbol}: {e}")
 
     if global_results_list:
         global_results_df = pd.concat(global_results_list, ignore_index=True)
@@ -247,4 +285,3 @@ def run_backtest(exchange_name, symbols, timeframe, length_range):
 
 if __name__ == "__main__":
     main()
-
