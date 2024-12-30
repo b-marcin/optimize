@@ -1,9 +1,9 @@
 import streamlit as st
 import ccxt
-import ccxt.async_support as ccxt_async  # For asynchronous fetching
+import ccxt.async_support as ccxt_async
 import pandas as pd
 from backtesting import Backtest, Strategy
-from backtesting.lib import crossover
+import numpy as np
 import time
 import warnings
 import matplotlib.pyplot as plt
@@ -13,9 +13,9 @@ import asyncio
 
 warnings.filterwarnings("ignore")
 
-# -------------------------------
-# Helper Functions
-# -------------------------------
+# ----------------------------------------
+# HELPER FUNCTIONS
+# ----------------------------------------
 
 def timeframe_to_pandas_freq(timeframe):
     """
@@ -32,11 +32,11 @@ def timeframe_to_pandas_freq(timeframe):
         '1w': 'W',
         '1M': 'M',
     }
-    return mapping.get(timeframe, 'D')  # Default to 'D' if unknown timeframe
+    return mapping.get(timeframe, 'D')  # Default to daily if not found
 
 def verify_data_completeness(data, timeframe):
     """
-    Verifies completeness of fetched data by checking for missing periods.
+    Verifies the completeness of the fetched data.
     """
     freq = timeframe_to_pandas_freq(timeframe)
     expected_index = pd.date_range(start=data.index.min(), end=data.index.max(), freq=freq)
@@ -46,25 +46,33 @@ def verify_data_completeness(data, timeframe):
         return False
     return True
 
-def crossunder(a, b):
+def pine_crossover(a, b):
     """
-    Detect crossunder: older bar a[-2] > b[-2] and latest bar a[-1] < b[-1].
+    Matches PineScript's ta.crossover(source, ref):
+    (source[1] < ref[1]) AND (source[0] > ref[0])
+    """
+    return a[-2] < b[-2] and a[-1] > b[-1]
+
+def pine_crossunder(a, b):
+    """
+    Matches PineScript's ta.crossunder(source, ref):
+    (source[1] > ref[1]) AND (source[0] < ref[0])
     """
     return a[-2] > b[-2] and a[-1] < b[-1]
 
 def calculate_atr(high, low, close, window=14):
     """
-    Calculates Average True Range (ATR) for a given window.
+    Standard ATR with rolling(window).mean().
     """
-    high_low = high - low
-    high_close = abs(high - close.shift())
-    low_close = abs(low - close.shift())
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    return tr.rolling(window=window).mean()
+    hl = high - low
+    hc = (high - close.shift()).abs()
+    lc = (low - close.shift()).abs()
+    tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+    return tr.rolling(window).mean()
 
-# -------------------------------
-# Async Data Fetching
-# -------------------------------
+# ----------------------------------------
+# ASYNC DATA FETCHING
+# ----------------------------------------
 
 async def fetch_symbol_data(exchange_name, symbol, timeframe, length_max, max_retries=5, backoff_factor=2):
     """
@@ -96,7 +104,6 @@ async def fetch_symbol_data(exchange_name, symbol, timeframe, length_max, max_re
         await exchange.close()
         return None
 
-    # Start from 2017 to ensure we have enough data
     start_date = exchange.parse8601('2017-01-01T00:00:00Z')
     since = start_date
     max_timestamp = exchange.milliseconds()
@@ -111,15 +118,16 @@ async def fetch_symbol_data(exchange_name, symbol, timeframe, length_max, max_re
                 st.write(f"No more data returned for {symbol}.")
                 break
 
-            # Check for overlap
             if all_data and ohlcv[0][0] <= all_data[-1][0]:
-                st.warning(f"Duplicate/overlapping data for {symbol}.")
+                st.warning(f"Duplicate or overlapping data for {symbol}.")
                 break
 
             all_data.extend(ohlcv)
             latest_timestamp = ohlcv[-1][0]
-            st.write(f"Fetched {len(all_data)} candles for {symbol}. "
-                     f"Latest date: {pd.to_datetime(latest_timestamp, unit='ms')}")
+            st.write(
+                f"Fetched {len(all_data)} candles for {symbol}. "
+                f"Latest date: {pd.to_datetime(latest_timestamp, unit='ms')}"
+            )
 
             since = latest_timestamp + 1
             if since > max_timestamp:
@@ -147,7 +155,6 @@ async def fetch_symbol_data(exchange_name, symbol, timeframe, length_max, max_re
         st.warning(f"No data fetched for {symbol}.")
         return None
 
-    # Convert to DataFrame
     data = pd.DataFrame(all_data, columns=["Timestamp", "Open", "High", "Low", "Close", "Volume"])
     data["Date"] = pd.to_datetime(data["Timestamp"], unit="ms")
     data.set_index("Date", inplace=True)
@@ -156,15 +163,13 @@ async def fetch_symbol_data(exchange_name, symbol, timeframe, length_max, max_re
 
     # Check completeness
     if not verify_data_completeness(data, timeframe):
-        st.warning(f"Missing data points for {symbol}.")
+        st.warning(f"There are missing data points for {symbol}.")
 
-    # You need ~400 bars for 200-bar ATR + 200-bar ATR SMA
-    required_length = (length_max * 2) + 10  
-    # Or specifically ~400 if length=200 in the strategy
-    # but let's keep it general.
-
+    required_length = (length_max * 2) + 10
     if len(data) < required_length:
-        st.warning(f"Only {len(data)} candles for {symbol}, need >= {required_length}.")
+        st.warning(
+            f"Only {len(data)} candles for {symbol}, need >= {required_length} for full ATR warm-up."
+        )
         return None
 
     return data
@@ -180,66 +185,96 @@ def run_concurrent_fetch(exchange_name, symbols, timeframe, length_max):
     loop.close()
     return data_list
 
-# -------------------------------
-# Caching
-# -------------------------------
+# ----------------------------------------
+# DATA CACHING
+# ----------------------------------------
+
 @st.cache_data(show_spinner=True, ttl=86400)
 def fetch_all_historical_data_cached(exchange_name, symbols, timeframe, length_max):
     return run_concurrent_fetch(exchange_name, symbols, timeframe, length_max)
 
-# -------------------------------
-# Strategy
-# -------------------------------
+# ----------------------------------------
+# PINE-REPLICATED STRATEGY
+# ----------------------------------------
 
-class TrendStrategy(Strategy):
+class PineReplicatedStrategy(Strategy):
+    """
+    This replicates your TradingView script logic:
+    - length = 10
+    - atr_value = ta.sma(ta.atr(200), 200) * 0.8
+    - sma_high = ta.sma(high, length) + atr_value
+    - sma_low  = ta.sma(low,  length) - atr_value
+    - trend = false initially
+    - if ta.crossover(close, sma_high) => trend = true
+    - if ta.crossunder(close, sma_low) => trend = false
+    - 'Buy' on same bar if trend changes from false->true
+    - 'Sell' on same bar if trend changes from true->false
+    """
+    # Default to length=10 for alignment with your script
+    length = 10  
+    atr_window = 200
     atr_multiplier = 0.8
-    length = 10
 
     def init(self):
         high = pd.Series(self.data.High)
         low = pd.Series(self.data.Low)
         close = pd.Series(self.data.Close)
 
-        # We do a 200-bar ATR, then a 200-bar SMA of that ATR
-        atr = calculate_atr(high, low, close, window=200)
-        atr_sma = atr.rolling(200).mean()
-        atr_adjusted = atr_sma * self.atr_multiplier
+        # 1) Calculate 200-bar ATR
+        atr_raw = calculate_atr(high, low, close, window=self.atr_window)
+        # 2) Then a 200-bar SMA of that ATR
+        atr_sma = atr_raw.rolling(self.atr_window).mean()
+        # 3) Multiply by 0.8
+        self.atr_value = atr_sma * self.atr_multiplier
 
+        # Sma over 'length'
         window_len = int(self.length)
-        # If your Pine Script does something else, adapt here
-        sma_high = high.rolling(window_len).mean() + atr_adjusted
-        sma_low = low.rolling(window_len).mean() - atr_adjusted
+        sma_of_high = high.rolling(window_len).mean()
+        sma_of_low  = low.rolling(window_len).mean()
 
-        self.sma_high = self.I(lambda: sma_high)
-        self.sma_low = self.I(lambda: sma_low)
+        self.sma_high = self.I(lambda: sma_of_high + self.atr_value)
+        self.sma_low  = self.I(lambda: sma_of_low  - self.atr_value)
+
+        # Equivalent to `var bool trend = false`
+        self.current_trend = False
 
     def next(self):
-        # Skip until indicators have valid values
-        if pd.isna(self.sma_high[-1]) or pd.isna(self.sma_low[-1]):
-            return
+        # Store old trend
+        old_trend = self.current_trend
 
-        # If close crosses above sma_high, open long
-        if crossover(self.data.Close, self.sma_high):
-            self.buy(size=0.1)
+        # Check cross conditions: if crossover => trend = True
+        if pine_crossover(self.data.Close, self.sma_high):
+            self.current_trend = True
+        elif pine_crossunder(self.data.Close, self.sma_low):
+            self.current_trend = False
 
-        # If close crosses below sma_low, close position
-        elif crossunder(self.data.Close, self.sma_low):
-            self.position.close()
+        # If 'trend' changed on this bar, we signal
+        if self.current_trend != old_trend:
+            if self.current_trend:
+                # Turned True => buy on same bar
+                self.buy()
+            else:
+                # Turned False => close position on same bar
+                self.position.close()
 
-# -------------------------------
-# Exhaustive Search
-# -------------------------------
+# ----------------------------------------
+# EXHAUSTIVE SEARCH
+# ----------------------------------------
 
 def exhaustive_search(data, length_range):
-    from backtesting import Backtest
-
     results = []
+
     for length in length_range:
-        TrendStrategy.length = length
-        bt = Backtest(data, TrendStrategy, cash=1_000_000, commission=0.002, exclusive_orders=True)
+        PineReplicatedStrategy.length = length
+        bt = Backtest(
+            data,
+            PineReplicatedStrategy,
+            cash=1_000_000,
+            commission=0.002,
+            exclusive_orders=True
+        )
         stats = bt.run()
 
-        # If zero trades, metrics like Sharpe might be NaN
         sharpe = stats.get("Sharpe Ratio", None)
         sortino = stats.get("Sortino Ratio", None)
         calmar = stats.get("Calmar Ratio", None)
@@ -250,7 +285,7 @@ def exhaustive_search(data, length_range):
         number_of_trades = stats.get("Total Trades", None)
         recovery_factor = stats.get("Recovery Factor", None)
 
-        # Skip if critical metrics are NaN (likely no trades)
+        # Skip if no trades or NaN metrics
         if pd.isna(sharpe) or pd.isna(sortino) or pd.isna(calmar):
             continue
 
@@ -279,14 +314,14 @@ def exhaustive_search(data, length_range):
 
     df = pd.DataFrame(results)
     if df.empty:
-        raise ValueError("No valid results found (possibly no trades at all).")
+        raise ValueError("No valid results found (possibly no trades).")
 
     best_result = df.loc[df["combined_score"].idxmax()]
     return best_result, df
 
-# -------------------------------
-# Plotting
-# -------------------------------
+# ----------------------------------------
+# PLOTTING
+# ----------------------------------------
 
 def plot_global_results(global_results_df):
     if 'length' not in global_results_df.columns:
@@ -306,7 +341,7 @@ def plot_global_results(global_results_df):
 
     plt.figure(figsize=(10, 6))
     sns.lineplot(data=grouped, x="length", y="avg_combined_score", marker="o")
-    plt.title("Average Combined Score by Length")
+    plt.title("Average Combined Score by Length (All Symbols)")
     plt.xlabel("Length")
     plt.ylabel("Avg. Combined Score")
     plt.axvline(x=best_length, color="red", linestyle="--", label=f"Best Length: {best_length}")
@@ -319,13 +354,11 @@ def plot_global_results(global_results_df):
     buf.seek(0)
     st.image(buf, caption="Average Combined Score by Length")
 
-# -------------------------------
-# Main Backtest Function
-# -------------------------------
+# ----------------------------------------
+# BACKTEST RUNNER
+# ----------------------------------------
 
 def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
-    from backtesting import Backtest
-
     global_results_list = []
     total_symbols = len(symbols)
     progress_bar = st.progress(0)
@@ -337,14 +370,13 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
     for idx, symbol in enumerate(symbols):
         symbol_counter += 1
         st.subheader(f"Processing {symbol}...")
-
         data = data_list[idx]
         if data is None:
-            st.warning(f"No data or insufficient data for {symbol}. Skipping.")
+            st.warning(f"Skipping {symbol} due to insufficient data or errors.\n")
             progress_bar.progress(symbol_counter / total_symbols)
             continue
 
-        st.write("Analyzing 'length' parameters...")
+        st.write("Analyzing all 'length' parameters...")
         try:
             best_result, all_results = exhaustive_search(data, length_range)
             csv_data = all_results.to_csv(index=False)
@@ -357,8 +389,14 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
             st.write(f"Results for {symbol} saved to CSV.")
 
             # Final run with best length
-            TrendStrategy.length = best_result["length"]
-            bt = Backtest(data, TrendStrategy, cash=1_000_000, commission=0.002, exclusive_orders=True)
+            PineReplicatedStrategy.length = best_result["length"]
+            bt = Backtest(
+                data,
+                PineReplicatedStrategy,
+                cash=1_000_000,
+                commission=0.002,
+                exclusive_orders=True
+            )
             final_stats = bt.run()
 
             st.markdown("**Performance Metrics:**")
@@ -383,16 +421,15 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
             for k, v in metrics.items():
                 st.write(f"- **{k}**: {safe_fmt(v)}")
 
-            # Retrieve trades from final_stats
+            # Grab trades
             trades = final_stats._trades if hasattr(final_stats, '_trades') else pd.DataFrame()
             if not isinstance(trades, pd.DataFrame):
                 trades = trades.to_dataframe()
 
             if not trades.empty:
-                # Safely rename columns based on your version of backtesting.py
+                # Minimal renaming for old vs. new backtesting.py versions
                 rename_map = {}
                 col_set = set(trades.columns)
-
                 if 'EntryTime' in col_set:
                     rename_map['EntryTime'] = 'Entry Time'
                 if 'ExitTime' in col_set:
@@ -421,13 +458,13 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
                         trades_display['Exit Time'], unit='ms', errors='coerce'
                     )
 
-                # Round off profit columns
+                # Round profit columns
                 if 'Profit (%)' in trades_display.columns:
                     trades_display['Profit (%)'] = trades_display['Profit (%)'].round(2)
                 if 'Profit ($)' in trades_display.columns:
                     trades_display['Profit ($)'] = trades_display['Profit ($)'].round(2)
 
-                # Choose final columns that exist
+                # Final subset
                 possible_cols = [
                     'Entry Time', 'Exit Time', 'Size',
                     'Entry Price', 'Exit Price', 'Profit (%)', 'Profit ($)'
@@ -435,7 +472,7 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
                 final_cols = [c for c in possible_cols if c in trades_display.columns]
                 trades_display = trades_display[final_cols]
 
-                # Show aggregated stats if "Profit (%)" exists
+                # Show aggregated stats if "Profit (%)" is present
                 if 'Profit (%)' in trades_display.columns:
                     st.markdown("**Aggregated Trade Stats:**")
                     total_trades = len(trades_display)
@@ -443,23 +480,22 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
                     losing_trades = len(trades_display[trades_display['Profit (%)'] <= 0])
                     total_profit = trades_display['Profit (%)'].sum()
                     avg_profit = trades_display['Profit (%)'].mean()
-                    if losing_trades > 0:
-                        avg_loss = trades_display.loc[trades_display['Profit (%)'] < 0, 'Profit (%)'].mean()
-                    else:
-                        avg_loss = float('nan')
+                    avg_loss = (
+                        trades_display.loc[trades_display['Profit (%)'] < 0, 'Profit (%)'].mean()
+                        if losing_trades > 0 else float('nan')
+                    )
 
                     st.write(f"- **Total Trades**: {total_trades}")
                     if total_trades > 0:
                         st.write(f"- **Profitable Trades**: {profitable_trades} "
-                                 f"({profitable_trades/total_trades*100:.2f}%)")
+                                 f"({profitable_trades / total_trades * 100:.2f}%)")
                         st.write(f"- **Losing Trades**: {losing_trades} "
-                                 f"({losing_trades/total_trades*100:.2f}%)")
+                                 f"({losing_trades / total_trades * 100:.2f}%)")
                         st.write(f"- **Total Profit (%)**: {total_profit:.2f}%")
                         st.write(f"- **Average Profit per Trade (%)**: {avg_profit:.2f}%")
                         if not pd.isna(avg_loss):
                             st.write(f"- **Average Loss per Trade (%)**: {avg_loss:.2f}%")
 
-                # Style table (to_html)
                 def highlight_profits(row):
                     if 'Profit (%)' in row and row['Profit (%)'] > 0:
                         return ['background-color: #d4edda'] * len(row)
@@ -469,7 +505,7 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
                         return [''] * len(row)
 
                 styled_trades = trades_display.style.apply(highlight_profits, axis=1)
-                trades_html = styled_trades.to_html()  # Use .to_html() for older pandas
+                trades_html = styled_trades.to_html()
                 st.markdown("**Trade Log:**")
                 st.markdown(trades_html, unsafe_allow_html=True)
 
@@ -484,11 +520,11 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
             else:
                 st.info("No trades were executed for this symbol.")
 
-            # Append best result to global results
+            # Append best result
             best_dict = best_result.to_dict()
             best_dict["symbol"] = symbol
             if 'length' not in best_dict:
-                best_dict['length'] = TrendStrategy.length
+                best_dict['length'] = PineReplicatedStrategy.length
             global_results_list.append(best_dict)
 
         except ValueError as ve:
@@ -504,33 +540,42 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
     else:
         st.error("No results to plot. Possibly no trades were found for any symbol.")
 
-# -------------------------------
-# Streamlit UI
-# -------------------------------
+# ----------------------------------------
+# STREAMLIT UI
+# ----------------------------------------
 
 def main():
-    st.title("📈 Crypto Backtesting Tool")
+    st.title("📈 Pine-Replicated Trend Strategy [Multi-Asset]")
 
     st.sidebar.header("🔧 Configuration")
 
-    exchange_name = st.sidebar.selectbox("Select Exchange", 
-                                         ["binance", "kraken", "bitfinex", "coinbasepro"])
+    exchange_name = st.sidebar.selectbox(
+        "Select Exchange",
+        ["binance", "kraken", "bitfinex", "coinbasepro"]
+    )
 
     symbols_input = st.sidebar.text_input(
-        "Enter Symbols (comma-separated)", "BTC/USDT,ETH/USDT"
+        "Enter Symbols (comma-separated)",
+        "BTC/USDT,ETH/USDT"
     )
     symbols = [s.strip().upper() for s in symbols_input.split(",")]
 
-    timeframe = st.sidebar.selectbox("Select Timeframe", 
-                                     ["1m", "5m", "15m", "30m", "1h", "4h", "1d"])
+    timeframe = st.sidebar.selectbox(
+        "Select Timeframe",
+        ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
+    )
 
     process_all = st.sidebar.checkbox("Process All Lengths (10-1000)")
     if not process_all:
-        length_min, length_max = st.sidebar.slider("Select Length Range", 
-                                                   10, 1000, (10, 200))
+        length_min, length_max = st.sidebar.slider(
+            "Select Length Range",
+            min_value=10,
+            max_value=1000,
+            value=(10, 200)
+        )
         length_range = range(length_min, length_max + 1)
     else:
-        st.sidebar.info("Processing all lengths 10–1000. This may take a while.")
+        st.sidebar.info("Processing all lengths 10–1000. This may take time.")
         length_range = range(10, 1001)
         length_max = 1000
 
