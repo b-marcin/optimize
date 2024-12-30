@@ -606,7 +606,7 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
             all_results["symbol"] = symbol
 
             # -------------------------------
-            # Change 3: Ensure 'length' is included and convert to dict
+            # Change 2: Ensure 'length' is included and convert to dict
             # -------------------------------
             # Convert Series to dictionary
             all_results = best_result.to_dict()
@@ -628,8 +628,11 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
         # Update progress bar
         progress_bar.progress(symbol_counter / total_symbols)
 
+    # -------------------------------
+    # Change 1: Correct Concatenation Method
+    # -------------------------------
     if global_results_list:
-        global_results_df = pd.concat(global_results_list, ignore_index=True)
+        global_results_df = pd.DataFrame(global_results_list)  # Changed from pd.concat to pd.DataFrame
         plot_global_results(global_results_df)
     else:
         st.error("No results to plot. All symbols skipped or had no valid trades.")
