@@ -307,7 +307,7 @@ class TrendStrategy(Strategy):
 
         window_len = int(self.length)
         sma_high = high.rolling(window=window_len).mean() + atr_adjusted
-        sma_low = low.rolling(window=window_len).mean() - atr_adjusted
+        sma_low = low.rolling(window_len).mean() - atr_adjusted
 
         self.sma_high = self.I(lambda: sma_high)
         self.sma_low = self.I(lambda: sma_low)
@@ -319,7 +319,8 @@ class TrendStrategy(Strategy):
         if crossover(self.data.Close, self.sma_high):
             self.buy(size=0.1)
         elif crossunder(self.data.Close, self.sma_low):
-            self.sell(size=0.1)
+            # Replace the sell order with a position close
+            self.position.close()
 
 # -------------------------------
 # Exhaustive Search Function
