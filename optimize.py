@@ -3,7 +3,7 @@ import ccxt
 import ccxt.async_support as ccxt_async  # For asynchronous fetching
 import pandas as pd
 from backtesting import Backtest, Strategy
-from backtesting.lib import crossover  # Removed crossunder import
+from backtesting.lib import crossover
 import time
 import warnings
 import matplotlib.pyplot as plt
@@ -11,7 +11,6 @@ import seaborn as sns
 from io import BytesIO
 import asyncio
 
-# Suppress warnings for cleaner output
 warnings.filterwarnings("ignore")
 
 # -------------------------------
@@ -21,12 +20,6 @@ warnings.filterwarnings("ignore")
 def timeframe_to_pandas_freq(timeframe):
     """
     Converts a ccxt timeframe string to a Pandas frequency string.
-
-    Parameters:
-        timeframe (str): Timeframe string (e.g., '1m', '5m', '1h', '1d').
-
-    Returns:
-        str: Pandas frequency string (e.g., 'T', '5T', 'H', 'D').
     """
     mapping = {
         '1m': 'T',
@@ -39,25 +32,14 @@ def timeframe_to_pandas_freq(timeframe):
         '1w': 'W',
         '1M': 'M',
     }
-    return mapping.get(timeframe, 'D')  # Default to daily if not found
+    return mapping.get(timeframe, 'D')  # Default to 'D' if unknown timeframe
 
 def verify_data_completeness(data, timeframe):
     """
-    Verifies the completeness of the fetched data.
-
-    Parameters:
-        data (pd.DataFrame): Historical OHLCV data.
-        timeframe (str): Timeframe for OHLCV data.
-
-    Returns:
-        bool: True if data is complete, False otherwise.
+    Verifies completeness of fetched data by checking for missing periods.
     """
     freq = timeframe_to_pandas_freq(timeframe)
-    expected_index = pd.date_range(
-        start=data.index.min(),
-        end=data.index.max(),
-        freq=freq
-    )
+    expected_index = pd.date_range(start=data.index.min(), end=data.index.max(), freq=freq)
     missing = expected_index.difference(data.index)
     if not missing.empty:
         st.warning(f"Data has {len(missing)} missing periods.")
@@ -65,46 +47,28 @@ def verify_data_completeness(data, timeframe):
     return True
 
 def crossunder(a, b):
-    """Detects crossunder between two series."""
+    """
+    Detect crossunder: older bar a[-2] > b[-2] and latest bar a[-1] < b[-1].
+    """
     return a[-2] > b[-2] and a[-1] < b[-1]
 
 def calculate_atr(high, low, close, window=14):
     """
-    Calculates the Average True Range (ATR).
-
-    Parameters:
-        high (pd.Series): High prices.
-        low (pd.Series): Low prices.
-        close (pd.Series): Close prices.
-        window (int): Rolling window for ATR.
-
-    Returns:
-        pd.Series: ATR values.
+    Calculates Average True Range (ATR) for a given window.
     """
     high_low = high - low
     high_close = abs(high - close.shift())
     low_close = abs(low - close.shift())
-    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    return true_range.rolling(window=window).mean()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    return tr.rolling(window=window).mean()
 
 # -------------------------------
-# Asynchronous Data Fetching Functions
+# Async Data Fetching
 # -------------------------------
 
 async def fetch_symbol_data(exchange_name, symbol, timeframe, length_max, max_retries=5, backoff_factor=2):
     """
-    Asynchronously fetches all historical OHLCV data for a given symbol from the specified exchange.
-
-    Parameters:
-        exchange_name (str): Name of the exchange (e.g., 'binance').
-        symbol (str): Trading pair symbol (e.g., 'BTC/USDT').
-        timeframe (str): Timeframe for OHLCV data (e.g., '1d').
-        length_max (int): Maximum length parameter to determine data requirements.
-        max_retries (int): Maximum number of retry attempts for network/exchange errors.
-        backoff_factor (int): Factor for exponential backoff between retries.
-
-    Returns:
-        pd.DataFrame or None: DataFrame containing historical data or None if failed.
+    Asynchronously fetches all historical OHLCV data for a given symbol.
     """
     exchange_class = getattr(ccxt_async, exchange_name, None)
     if exchange_class is None:
@@ -112,91 +76,68 @@ async def fetch_symbol_data(exchange_name, symbol, timeframe, length_max, max_re
         return None
 
     exchange = exchange_class({
-        'enableRateLimit': True,  # Enable rate limit handling
-        'timeout': 30000,         # Set a longer timeout if necessary
+        'enableRateLimit': True,
+        'timeout': 30000,
     })
 
     all_data = []
-    limit = 1000  # Number of bars per API call
+    limit = 1000
 
     try:
         st.write(f"Loading markets for {exchange_name}...")
         await exchange.load_markets()
-    except ccxt_async.NetworkError as e:
-        st.error(f"Network error while loading markets for {symbol}: {e}")
-        await exchange.close()
-        return None
-    except ccxt_async.ExchangeError as e:
-        st.error(f"Exchange error while loading markets for {symbol}: {e}")
-        await exchange.close()
-        return None
     except Exception as e:
-        st.error(f"Unexpected error while loading markets for {symbol}: {e}")
+        st.error(f"Error loading markets for {symbol}: {e}")
         await exchange.close()
         return None
 
-    # Verify if the symbol exists on the exchange
     if symbol not in exchange.symbols:
-        st.error(f"Symbol '{symbol}' not found on exchange '{exchange_name}'.")
+        st.error(f"Symbol '{symbol}' not found on '{exchange_name}'.")
         await exchange.close()
         return None
 
-    # Determine the earliest possible 'since' timestamp
+    # Start from 2017 to ensure we have enough data
     start_date = exchange.parse8601('2017-01-01T00:00:00Z')
     since = start_date
-
-    # Get current timestamp in ms to prevent fetching future data
     max_timestamp = exchange.milliseconds()
 
     st.write(f"Fetching data for {symbol} from {exchange_name}...")
-
-    attempt = 0  # Initialize attempt counter
+    attempt = 0
 
     while True:
         try:
             ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
             if not ohlcv:
-                st.write(f"No more data returned for {symbol}. Finished fetching.")
+                st.write(f"No more data returned for {symbol}.")
                 break
 
-            # Check for duplicates or overlapping data
+            # Check for overlap
             if all_data and ohlcv[0][0] <= all_data[-1][0]:
-                st.warning(f"Duplicate or overlapping data detected for {symbol}.")
+                st.warning(f"Duplicate/overlapping data for {symbol}.")
                 break
 
             all_data.extend(ohlcv)
             latest_timestamp = ohlcv[-1][0]
-            st.write(
-                f"Fetched {len(all_data)} candles for {symbol}. "
-                f"Latest date: {pd.to_datetime(latest_timestamp, unit='ms')}"
-            )
+            st.write(f"Fetched {len(all_data)} candles for {symbol}. "
+                     f"Latest date: {pd.to_datetime(latest_timestamp, unit='ms')}")
 
-            # Update 'since' to the last timestamp plus one millisecond
             since = latest_timestamp + 1
-
-            # Safety check to prevent fetching beyond the current time
             if since > max_timestamp:
                 st.write(f"Reached current timestamp for {symbol}.")
                 break
 
-            # Respect rate limits
             await asyncio.sleep(exchange.rateLimit / 1000)
 
-        except ccxt_async.NetworkError as e:
-            st.warning(f"Network error fetching data for {symbol}: {e}. Retrying in {backoff_factor ** attempt} seconds...")
+        except ccxt.NetworkError as e:
+            st.warning(f"Network error for {symbol}: {e}. Retrying...")
             attempt += 1
             if attempt >= max_retries:
-                st.error(f"Failed to fetch data for {symbol} after {max_retries} attempts.")
+                st.error(f"Failed after {max_retries} retries for {symbol}.")
                 await exchange.close()
                 return None
             await asyncio.sleep(backoff_factor ** attempt)
-            continue
-        except ccxt_async.ExchangeError as e:
-            st.error(f"Exchange error fetching data for {symbol}: {e}. Skipping symbol.")
-            await exchange.close()
-            return None
         except Exception as e:
-            st.error(f"Unexpected error fetching data for {symbol}: {e}. Skipping symbol.")
+            st.error(f"Error fetching data for {symbol}: {e}")
             await exchange.close()
             return None
 
@@ -213,32 +154,26 @@ async def fetch_symbol_data(exchange_name, symbol, timeframe, length_max, max_re
     data.drop(columns=["Timestamp"], inplace=True)
     data.sort_index(inplace=True)
 
-    # Verify data completeness
+    # Check completeness
     if not verify_data_completeness(data, timeframe):
-        st.warning(f"There are missing data points for {symbol}.")
+        st.warning(f"Missing data points for {symbol}.")
 
-    # Validate data length
-    required_length = (length_max * 2) + 10  # window_atr = 2 × length_max + buffer
+    # You need ~400 bars for 200-bar ATR + 200-bar ATR SMA
+    required_length = (length_max * 2) + 10  
+    # Or specifically ~400 if length=200 in the strategy
+    # but let's keep it general.
+
     if len(data) < required_length:
-        st.warning(
-            f"Insufficient data retrieved for {symbol}. "
-            f"Only {len(data)} candles fetched, which is less than the required {required_length}."
-        )
+        st.warning(f"Only {len(data)} candles for {symbol}, need >= {required_length}.")
         return None
 
     return data
 
 async def fetch_all_symbols_data(exchange_name, symbols, timeframe, length_max):
-    """
-    Asynchronously fetches data for all symbols concurrently.
-    """
-    tasks = [fetch_symbol_data(exchange_name, symbol, timeframe, length_max) for symbol in symbols]
+    tasks = [fetch_symbol_data(exchange_name, s, timeframe, length_max) for s in symbols]
     return await asyncio.gather(*tasks)
 
 def run_concurrent_fetch(exchange_name, symbols, timeframe, length_max):
-    """
-    Runs the asynchronous fetching of all symbols data.
-    """
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     data_list = loop.run_until_complete(fetch_all_symbols_data(exchange_name, symbols, timeframe, length_max))
@@ -246,24 +181,17 @@ def run_concurrent_fetch(exchange_name, symbols, timeframe, length_max):
     return data_list
 
 # -------------------------------
-# Data Fetching Function with Caching
+# Caching
 # -------------------------------
-
-@st.cache_data(show_spinner=True, ttl=86400)  # Cache data for 1 day
+@st.cache_data(show_spinner=True, ttl=86400)
 def fetch_all_historical_data_cached(exchange_name, symbols, timeframe, length_max):
-    """
-    Cached function to fetch historical data for all symbols.
-    """
     return run_concurrent_fetch(exchange_name, symbols, timeframe, length_max)
 
 # -------------------------------
-# Trading Strategy Class
+# Strategy
 # -------------------------------
 
 class TrendStrategy(Strategy):
-    """
-    A trend-following strategy based on SMA and ATR.
-    """
     atr_multiplier = 0.8
     length = 10
 
@@ -272,52 +200,46 @@ class TrendStrategy(Strategy):
         low = pd.Series(self.data.Low)
         close = pd.Series(self.data.Close)
 
-        # Updated ATR Calculation to match Pine Script:
-        atr = calculate_atr(high, low, close, window=200)   # ATR(200)
-        atr_sma = atr.rolling(window=200).mean()            # SMA over ATR(200)
-        atr_adjusted = atr_sma * self.atr_multiplier        # multiplied by 0.8
+        # We do a 200-bar ATR, then a 200-bar SMA of that ATR
+        atr = calculate_atr(high, low, close, window=200)
+        atr_sma = atr.rolling(200).mean()
+        atr_adjusted = atr_sma * self.atr_multiplier
 
         window_len = int(self.length)
-        sma_high = high.rolling(window=window_len).mean() + atr_adjusted
-        sma_low = low.rolling(window=window_len).mean() - atr_adjusted
+        # If your Pine Script does something else, adapt here
+        sma_high = high.rolling(window_len).mean() + atr_adjusted
+        sma_low = low.rolling(window_len).mean() - atr_adjusted
 
         self.sma_high = self.I(lambda: sma_high)
         self.sma_low = self.I(lambda: sma_low)
 
     def next(self):
+        # Skip until indicators have valid values
         if pd.isna(self.sma_high[-1]) or pd.isna(self.sma_low[-1]):
             return
 
+        # If close crosses above sma_high, open long
         if crossover(self.data.Close, self.sma_high):
             self.buy(size=0.1)
+
+        # If close crosses below sma_low, close position
         elif crossunder(self.data.Close, self.sma_low):
-            # Replace the sell order with a position close
             self.position.close()
 
 # -------------------------------
-# Exhaustive Search Function
+# Exhaustive Search
 # -------------------------------
 
 def exhaustive_search(data, length_range):
-    """
-    Performs exhaustive search over a range of 'length' parameters to find the best strategy.
-    """
     from backtesting import Backtest
 
     results = []
-
     for length in length_range:
         TrendStrategy.length = length
-        bt = Backtest(
-            data,
-            TrendStrategy,
-            cash=1_000_000,
-            commission=0.002,
-            exclusive_orders=True
-        )
+        bt = Backtest(data, TrendStrategy, cash=1_000_000, commission=0.002, exclusive_orders=True)
         stats = bt.run()
 
-        # Extract additional metrics if available
+        # If zero trades, metrics like Sharpe might be NaN
         sharpe = stats.get("Sharpe Ratio", None)
         sortino = stats.get("Sortino Ratio", None)
         calmar = stats.get("Calmar Ratio", None)
@@ -328,11 +250,10 @@ def exhaustive_search(data, length_range):
         number_of_trades = stats.get("Total Trades", None)
         recovery_factor = stats.get("Recovery Factor", None)
 
-        # Ensure essential metrics are present (some strategies can fail or have no trades)
+        # Skip if critical metrics are NaN (likely no trades)
         if pd.isna(sharpe) or pd.isna(sortino) or pd.isna(calmar):
             continue
 
-        # Calculate combined score with weights
         combined_score = sharpe * 0.3 + sortino * 0.3 + calmar * 0.2
         if profit_factor and profit_factor > 1:
             combined_score += (profit_factor - 1) * 0.1
@@ -356,24 +277,21 @@ def exhaustive_search(data, length_range):
             "max_drawdown": stats.get("Max. Drawdown [%]", None),
         })
 
-    results_df = pd.DataFrame(results)
-    if results_df.empty:
-        raise ValueError("No valid results found during exhaustive search.")
+    df = pd.DataFrame(results)
+    if df.empty:
+        raise ValueError("No valid results found (possibly no trades at all).")
 
-    best_result = results_df.loc[results_df["combined_score"].idxmax()]
-    return best_result, results_df
+    best_result = df.loc[df["combined_score"].idxmax()]
+    return best_result, df
 
 # -------------------------------
-# Plotting Function
+# Plotting
 # -------------------------------
 
 def plot_global_results(global_results_df):
-    """
-    Plots the average combined score by length across all symbols.
-    """
     if 'length' not in global_results_df.columns:
-        st.error("The 'length' column is missing from the global results DataFrame.")
-        st.stop()
+        st.error("Missing 'length' column in results.")
+        return
 
     grouped = global_results_df.groupby("length")["combined_score"].mean().reset_index()
     grouped.rename(columns={"combined_score": "avg_combined_score"}, inplace=True)
@@ -383,14 +301,14 @@ def plot_global_results(global_results_df):
     best_score = grouped.loc[best_idx, "avg_combined_score"]
 
     st.write("\n## Global Best Length")
-    st.write(f"**Best Length (Avg across all assets)** = {best_length}")
-    st.write(f"**Average Combined Score at Best Length** = {best_score:.2f}")
+    st.write(f"**Best Length (Avg across all tested symbols)** = {best_length}")
+    st.write(f"**Average Combined Score** = {best_score:.2f}")
 
     plt.figure(figsize=(10, 6))
     sns.lineplot(data=grouped, x="length", y="avg_combined_score", marker="o")
-    plt.title("Average Combined Score by Length (All Symbols)")
-    plt.xlabel("Length Parameter")
-    plt.ylabel("Average Combined Score")
+    plt.title("Average Combined Score by Length")
+    plt.xlabel("Length")
+    plt.ylabel("Avg. Combined Score")
     plt.axvline(x=best_length, color="red", linestyle="--", label=f"Best Length: {best_length}")
     plt.legend()
     plt.tight_layout()
@@ -402,13 +320,10 @@ def plot_global_results(global_results_df):
     st.image(buf, caption="Average Combined Score by Length")
 
 # -------------------------------
-# Backtesting Function
+# Main Backtest Function
 # -------------------------------
 
 def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
-    """
-    Runs backtests for all specified symbols and aggregates the results.
-    """
     from backtesting import Backtest
 
     global_results_list = []
@@ -416,51 +331,39 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
     progress_bar = st.progress(0)
     symbol_counter = 0
 
-    # Fetch all data concurrently
     st.write("Fetching data for all symbols...")
     data_list = fetch_all_historical_data_cached(exchange_name, symbols, timeframe, length_max)
 
     for idx, symbol in enumerate(symbols):
         symbol_counter += 1
         st.subheader(f"Processing {symbol}...")
+
         data = data_list[idx]
         if data is None:
-            st.warning(f"Skipping {symbol} due to insufficient data or errors.\n")
+            st.warning(f"No data or insufficient data for {symbol}. Skipping.")
             progress_bar.progress(symbol_counter / total_symbols)
             continue
 
-        st.write("Analyzing all 'length' parameters...")
+        st.write("Analyzing 'length' parameters...")
         try:
             best_result, all_results = exhaustive_search(data, length_range)
-
-            # Allow CSV download of the entire analysis
-            csv = all_results.to_csv(index=False)
+            csv_data = all_results.to_csv(index=False)
             st.download_button(
-                label="Download Results CSV",
-                data=csv,
-                file_name=f"{symbol.replace('/', '')}_length_analysis.csv",
-                mime="text/csv",
+                label="Download Full Results CSV",
+                data=csv_data,
+                file_name=f"{symbol.replace('/', '')}_results.csv",
+                mime="text/csv"
             )
             st.write(f"Results for {symbol} saved to CSV.")
 
-            # Set the best length and run the final backtest
+            # Final run with best length
             TrendStrategy.length = best_result["length"]
-            bt = Backtest(
-                data,
-                TrendStrategy,
-                cash=1_000_000,
-                commission=0.002,
-                exclusive_orders=True
-            )
+            bt = Backtest(data, TrendStrategy, cash=1_000_000, commission=0.002, exclusive_orders=True)
             final_stats = bt.run()
 
             st.markdown("**Performance Metrics:**")
-
-            def safe_format(value, decimals=2):
-                if isinstance(value, (int, float)):
-                    return f"{value:.{decimals}f}"
-                else:
-                    return value
+            def safe_fmt(v, d=2):
+                return f"{v:.{d}f}" if isinstance(v, (int, float)) else str(v)
 
             metrics = {
                 "Best Length": best_result['length'],
@@ -477,41 +380,29 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
                 "Final Equity ($)": final_stats.get('Equity Final [$]', 'N/A'),
                 "Return (%)": final_stats.get('Return [%]', 'N/A'),
             }
+            for k, v in metrics.items():
+                st.write(f"- **{k}**: {safe_fmt(v)}")
 
-            for metric, value in metrics.items():
-                formatted_value = safe_format(value)
-                st.write(f"- **{metric}**: {formatted_value}")
-
-            # -------------------------------
-            # Retrieve Trades Safely
-            # -------------------------------
+            # Retrieve trades from final_stats
             trades = final_stats._trades if hasattr(final_stats, '_trades') else pd.DataFrame()
             if not isinstance(trades, pd.DataFrame):
                 trades = trades.to_dataframe()
 
             if not trades.empty:
-                # Safely rename columns to unify naming across versions of backtesting.py
-                # For example, older versions might use 'EntryTime', 'ExitTime', 'PnL%', etc.
+                # Safely rename columns based on your version of backtesting.py
                 rename_map = {}
                 col_set = set(trades.columns)
 
-                # Time columns
                 if 'EntryTime' in col_set:
                     rename_map['EntryTime'] = 'Entry Time'
                 if 'ExitTime' in col_set:
                     rename_map['ExitTime'] = 'Exit Time'
-
-                # Price columns
                 if 'EntryPrice' in col_set:
                     rename_map['EntryPrice'] = 'Entry Price'
                 if 'ExitPrice' in col_set:
                     rename_map['ExitPrice'] = 'Exit Price'
-
-                # Size / Shares
                 if 'Shares' in col_set:
                     rename_map['Shares'] = 'Size'
-
-                # PnL columns
                 if 'PnL%' in col_set:
                     rename_map['PnL%'] = 'Profit (%)'
                 if 'PnL' in col_set:
@@ -520,7 +411,7 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
                 trades_display = trades.copy()
                 trades_display.rename(columns=rename_map, inplace=True)
 
-                # Convert times if they exist
+                # Convert times if columns exist
                 if 'Entry Time' in trades_display.columns:
                     trades_display['Entry Time'] = pd.to_datetime(
                         trades_display['Entry Time'], unit='ms', errors='coerce'
@@ -530,148 +421,121 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
                         trades_display['Exit Time'], unit='ms', errors='coerce'
                     )
 
-                # Round profit columns if they exist
+                # Round off profit columns
                 if 'Profit (%)' in trades_display.columns:
                     trades_display['Profit (%)'] = trades_display['Profit (%)'].round(2)
                 if 'Profit ($)' in trades_display.columns:
                     trades_display['Profit ($)'] = trades_display['Profit ($)'].round(2)
 
-                # Final subset (only include columns that actually exist)
+                # Choose final columns that exist
                 possible_cols = [
                     'Entry Time', 'Exit Time', 'Size',
                     'Entry Price', 'Exit Price', 'Profit (%)', 'Profit ($)'
                 ]
-                columns_to_show = [c for c in possible_cols if c in trades_display.columns]
-                trades_display = trades_display[columns_to_show]
+                final_cols = [c for c in possible_cols if c in trades_display.columns]
+                trades_display = trades_display[final_cols]
 
-                # Show aggregated stats if 'Profit (%)' is available
+                # Show aggregated stats if "Profit (%)" exists
                 if 'Profit (%)' in trades_display.columns:
-                    st.markdown("**Aggregated Trade Statistics:**")
+                    st.markdown("**Aggregated Trade Stats:**")
                     total_trades = len(trades_display)
                     profitable_trades = len(trades_display[trades_display['Profit (%)'] > 0])
                     losing_trades = len(trades_display[trades_display['Profit (%)'] <= 0])
                     total_profit = trades_display['Profit (%)'].sum()
-                    average_profit = trades_display['Profit (%)'].mean()
-                    average_loss = trades_display[trades_display['Profit (%)'] < 0]['Profit (%)'].mean() \
-                                   if losing_trades > 0 else float('nan')
-                    profit_factor = final_stats.get("Profit Factor", "N/A")
-                    expectancy = final_stats.get("Expectancy", "N/A")
+                    avg_profit = trades_display['Profit (%)'].mean()
+                    if losing_trades > 0:
+                        avg_loss = trades_display.loc[trades_display['Profit (%)'] < 0, 'Profit (%)'].mean()
+                    else:
+                        avg_loss = float('nan')
 
                     st.write(f"- **Total Trades**: {total_trades}")
                     if total_trades > 0:
                         st.write(f"- **Profitable Trades**: {profitable_trades} "
-                                 f"({(profitable_trades / total_trades * 100):.2f}%)")
+                                 f"({profitable_trades/total_trades*100:.2f}%)")
                         st.write(f"- **Losing Trades**: {losing_trades} "
-                                 f"({(losing_trades / total_trades * 100):.2f}%)")
+                                 f"({losing_trades/total_trades*100:.2f}%)")
                         st.write(f"- **Total Profit (%)**: {total_profit:.2f}%")
-                        st.write(f"- **Average Profit per Trade (%)**: {average_profit:.2f}%")
-                        if not pd.isna(average_loss):
-                            st.write(f"- **Average Loss per Trade (%)**: {average_loss:.2f}%")
-                        st.write(f"- **Profit Factor**: {profit_factor}")
-                        if expectancy != "N/A":
-                            st.write(f"- **Expectancy**: {float(expectancy):.2f}")
-                        else:
-                            st.write(f"- **Expectancy**: N/A")
+                        st.write(f"- **Average Profit per Trade (%)**: {avg_profit:.2f}%")
+                        if not pd.isna(avg_loss):
+                            st.write(f"- **Average Loss per Trade (%)**: {avg_loss:.2f}%")
 
-                # Highlight profitable vs. losing trades
+                # Style table (to_html)
                 def highlight_profits(row):
                     if 'Profit (%)' in row and row['Profit (%)'] > 0:
-                        color = 'background-color: #d4edda'  # Light green
+                        return ['background-color: #d4edda'] * len(row)
                     elif 'Profit (%)' in row and row['Profit (%)'] < 0:
-                        color = 'background-color: #f8d7da'  # Light red
+                        return ['background-color: #f8d7da'] * len(row)
                     else:
-                        color = ''
-                    return [color] * len(row)
+                        return [''] * len(row)
 
                 styled_trades = trades_display.style.apply(highlight_profits, axis=1)
-                trades_html = styled_trades.render()
+                trades_html = styled_trades.to_html()  # Use .to_html() for older pandas
                 st.markdown("**Trade Log:**")
                 st.markdown(trades_html, unsafe_allow_html=True)
 
-                # Allow CSV download of trades
+                # Download trades
                 trades_csv = trades_display.to_csv(index=False)
                 st.download_button(
                     label="Download Trades CSV",
                     data=trades_csv,
                     file_name=f"{symbol.replace('/', '')}_trades.csv",
-                    mime="text/csv",
+                    mime="text/csv"
                 )
             else:
                 st.info("No trades were executed for this symbol.")
 
-            # Prepare to store best results
-            all_results_copy = best_result.to_dict()
-            all_results_copy["symbol"] = symbol
-            if 'length' not in all_results_copy:
-                all_results_copy['length'] = TrendStrategy.length
-
-            global_results_list.append(all_results_copy)
+            # Append best result to global results
+            best_dict = best_result.to_dict()
+            best_dict["symbol"] = symbol
+            if 'length' not in best_dict:
+                best_dict['length'] = TrendStrategy.length
+            global_results_list.append(best_dict)
 
         except ValueError as ve:
             st.error(f"No valid results found for {symbol}: {ve}")
         except Exception as e:
-            st.error(f"An unexpected error occurred while processing {symbol}: {e}")
+            st.error(f"Unexpected error for {symbol}: {e}")
 
         progress_bar.progress(symbol_counter / total_symbols)
 
     if global_results_list:
-        global_results_df = pd.DataFrame(global_results_list)
-        plot_global_results(global_results_df)
+        global_df = pd.DataFrame(global_results_list)
+        plot_global_results(global_df)
     else:
-        st.error("No results to plot. All symbols skipped or had no valid trades.")
+        st.error("No results to plot. Possibly no trades were found for any symbol.")
 
 # -------------------------------
-# Streamlit App
+# Streamlit UI
 # -------------------------------
 
 def main():
-    """
-    Main function to run the Streamlit app.
-    """
     st.title("📈 Crypto Backtesting Tool")
 
     st.sidebar.header("🔧 Configuration")
 
-    # Exchange Selection
-    exchange_name = st.sidebar.selectbox(
-        "Select Exchange",
-        ["binance", "kraken", "bitfinex", "coinbasepro"]
-    )
+    exchange_name = st.sidebar.selectbox("Select Exchange", 
+                                         ["binance", "kraken", "bitfinex", "coinbasepro"])
 
-    # Symbols Input
     symbols_input = st.sidebar.text_input(
-        "Enter Symbols (comma-separated, e.g., BTC/USDT,ETH/USDT)",
-        "BTC/USDT,ETH/USDT"
+        "Enter Symbols (comma-separated)", "BTC/USDT,ETH/USDT"
     )
-    symbols = [symbol.strip().upper() for symbol in symbols_input.split(",")]
+    symbols = [s.strip().upper() for s in symbols_input.split(",")]
 
-    # Timeframe Selection
-    timeframe = st.sidebar.selectbox(
-        "Select Timeframe",
-        ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
-    )
+    timeframe = st.sidebar.selectbox("Select Timeframe", 
+                                     ["1m", "5m", "15m", "30m", "1h", "4h", "1d"])
 
-    # Process All Lengths Checkbox
     process_all = st.sidebar.checkbox("Process All Lengths (10-1000)")
-
     if not process_all:
-        length_min, length_max = st.sidebar.slider(
-            "Select Length Range",
-            min_value=10,
-            max_value=1000,
-            value=(10, 200)
-        )
+        length_min, length_max = st.sidebar.slider("Select Length Range", 
+                                                   10, 1000, (10, 200))
         length_range = range(length_min, length_max + 1)
     else:
-        st.sidebar.info("Processing all lengths from 10 to 1000. This may take some time.")
+        st.sidebar.info("Processing all lengths 10–1000. This may take a while.")
         length_range = range(10, 1001)
         length_max = 1000
 
     if st.sidebar.button("🚀 Run Backtest"):
         run_backtest(exchange_name, symbols, timeframe, length_range, length_max=1000)
 
-# -------------------------------
-# Entry Point
-# -------------------------------
 if __name__ == "__main__":
     main()
