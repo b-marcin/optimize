@@ -303,15 +303,15 @@ class TrendStrategy(Strategy):
         # -------------------------------
         # Align ATR Calculation with Pine Script
         # -------------------------------
-        # Original ATR Calculation:
+        # Original ATR Calculation (commented out):
         # window_atr = int(self.length * 2)  # Example: ATR window = 2 × length
         # atr = calculate_atr(high, low, close, window=window_atr)
         # atr_adjusted = atr * self.atr_multiplier
 
         # Updated ATR Calculation to match Pine Script:
-        atr = calculate_atr(high, low, close, window=200)          # ATR with window=200
-        atr_sma = atr.rolling(window=200).mean()                  # SMA over ATR with window=200
-        atr_adjusted = atr_sma * self.atr_multiplier             # Multiply by 0.8
+        atr = calculate_atr(high, low, close, window=200)   # ATR with window=200
+        atr_sma = atr.rolling(window=200).mean()            # SMA over ATR with window=200
+        atr_adjusted = atr_sma * self.atr_multiplier        # Multiply by 0.8
 
         window_len = int(self.length)
         sma_high = high.rolling(window=window_len).mean() + atr_adjusted
@@ -415,16 +415,10 @@ def plot_global_results(global_results_df):
     Parameters:
         global_results_df (pd.DataFrame): DataFrame containing all backtest results.
     """
-    # -------------------------------
-    # Check if 'length' column exists
-    # -------------------------------
     if 'length' not in global_results_df.columns:
         st.error("The 'length' column is missing from the global results DataFrame.")
         st.stop()  # Stop further execution
 
-    # -------------------------------
-    # Modify groupby operation
-    # -------------------------------
     grouped = global_results_df.groupby("length")["combined_score"].mean().reset_index()
 
     grouped.rename(columns={"combined_score": "avg_combined_score"}, inplace=True)
@@ -445,7 +439,6 @@ def plot_global_results(global_results_df):
     plt.legend()
     plt.tight_layout()
 
-    # Convert plot to bytes and display
     buf = BytesIO()
     plt.savefig(buf, format="png")
     plt.close()
@@ -510,14 +503,12 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
 
             st.markdown("**Performance Metrics:**")
 
-            # Define a helper function for safe formatting
             def safe_format(value, decimals=2):
                 if isinstance(value, (int, float)):
                     return f"{value:.{decimals}f}"
                 else:
                     return value
 
-            # Display each metric with safe formatting
             metrics = {
                 "Best Length": best_result['length'],
                 "Sharpe Ratio": final_stats.get('Sharpe Ratio', 'N/A'),
@@ -538,13 +529,15 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
                 formatted_value = safe_format(value)
                 st.write(f"- **{metric}**: {formatted_value}")
 
-            # Extract and display trade details
-            # Access 'trades' after running the backtest
-            if hasattr(bt, 'trades'):
-                trades = bt.trades.to_dataframe()  # Convert to DataFrame
-            else:
-                trades = pd.DataFrame()
+            # -------------------------------
+            # CHANGED BLOCK: Properly Retrieve Trades
+            # -------------------------------
+            # Instead of using `bt.trades`, we pull from `final_stats._trades`.
+            trades = final_stats._trades if hasattr(final_stats, '_trades') else pd.DataFrame()
+            if not isinstance(trades, pd.DataFrame):
+                trades = trades.to_dataframe()
 
+            # Now `trades` should contain the actual trades if any exist.
             if not trades.empty:
                 trades_display = trades.copy()
                 trades_display['Entry Time'] = pd.to_datetime(trades_display['Entry Time'], unit='ms')
@@ -561,7 +554,6 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
                     'Exit Price': 'Sell Price'
                 }, inplace=True)
 
-                # Display aggregated statistics
                 st.markdown("**Aggregated Trade Statistics:**")
                 total_trades = len(trades_display)
                 profitable_trades = len(trades_display[trades_display['Profit (%)'] > 0])
@@ -573,17 +565,18 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
                 expectancy = final_stats.get("Expectancy", "N/A")
 
                 st.write(f"- **Total Trades**: {total_trades}")
-                st.write(f"- **Profitable Trades**: {profitable_trades} ({(profitable_trades/total_trades*100):.2f}%)")
-                st.write(f"- **Losing Trades**: {losing_trades} ({(losing_trades/total_trades*100):.2f}%)")
+                st.write(f"- **Profitable Trades**: {profitable_trades} "
+                         f"({(profitable_trades / total_trades * 100):.2f}%)")
+                st.write(f"- **Losing Trades**: {losing_trades} "
+                         f"({(losing_trades / total_trades * 100):.2f}%)")
                 st.write(f"- **Total Profit (%)**: {total_profit:.2f}%")
                 st.write(f"- **Average Profit per Trade (%)**: {average_profit:.2f}%")
                 st.write(f"- **Average Loss per Trade (%)**: {average_loss:.2f}%")
                 st.write(f"- **Profit Factor**: {profit_factor}")
-                st.write(f"- **Expectancy**: {expectancy:.2f}")
+                st.write(f"- **Expectancy**: {expectancy:.2f}" if expectancy != "N/A" else f"- **Expectancy**: N/A")
 
                 st.markdown("**Trade Log:**")
 
-                # Apply conditional formatting
                 def highlight_profits(row):
                     if row['Profit (%)'] > 0:
                         color = 'background-color: #d4edda'  # Light green
@@ -594,10 +587,7 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
                     return [color] * len(row)
 
                 styled_trades = trades_display.style.apply(highlight_profits, axis=1)
-
-                # Convert styled DataFrame to HTML
                 trades_html = styled_trades.render()
-
                 st.markdown(trades_html, unsafe_allow_html=True)
 
                 # Enable CSV download of trades
@@ -611,23 +601,20 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
             else:
                 st.info("No trades were executed for this symbol.")
 
-            all_results = best_result.copy()
-            all_results["symbol"] = symbol
+            all_results_copy = best_result.copy()
+            all_results_copy["symbol"] = symbol
 
-            # -------------------------------
-            # Ensure 'length' is included and convert to dict
-            # -------------------------------
             # Convert Series to dictionary
-            all_results = best_result.to_dict()
+            all_results_copy = best_result.to_dict()
 
             # Add 'symbol' key
-            all_results["symbol"] = symbol
+            all_results_copy["symbol"] = symbol
 
             # Ensure 'length' is included
-            if 'length' not in all_results:
-                all_results['length'] = TrendStrategy.length  # Assign current length
+            if 'length' not in all_results_copy:
+                all_results_copy['length'] = TrendStrategy.length
 
-            global_results_list.append(all_results)  # Now appending a dict
+            global_results_list.append(all_results_copy)  # Append dict of best_result + symbol
 
         except ValueError as ve:
             st.error(f"No valid results found for {symbol}: {ve}")
@@ -637,11 +624,8 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
         # Update progress bar
         progress_bar.progress(symbol_counter / total_symbols)
 
-    # -------------------------------
-    # Correct Concatenation Method
-    # -------------------------------
     if global_results_list:
-        global_results_df = pd.DataFrame(global_results_list)  # Changed from pd.concat to pd.DataFrame
+        global_results_df = pd.DataFrame(global_results_list)
         plot_global_results(global_results_df)
     else:
         st.error("No results to plot. All symbols skipped or had no valid trades.")
@@ -685,16 +669,14 @@ def main():
         length_min, length_max = st.sidebar.slider(
             "Select Length Range",
             min_value=10,
-            max_value=1000,  # Increased max value from 200 to 1000
+            max_value=1000,
             value=(10, 200)
         )
         length_range = range(length_min, length_max + 1)
     else:
-        # Set to entire possible range
         st.sidebar.info("Processing all lengths from 10 to 1000. This may take some time.")
         length_range = range(10, 1001)
 
-    # Run Backtest Button
     if st.sidebar.button("🚀 Run Backtest"):
         run_backtest(exchange_name, symbols, timeframe, length_range, length_max=1000)
 
