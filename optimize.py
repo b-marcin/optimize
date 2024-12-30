@@ -606,12 +606,19 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
             all_results["symbol"] = symbol
 
             # -------------------------------
-            # Change 3: Ensure 'length' is included
+            # Change 3: Ensure 'length' is included and convert to dict
             # -------------------------------
+            # Convert Series to dictionary
+            all_results = best_result.to_dict()
+
+            # Add 'symbol' key
+            all_results["symbol"] = symbol
+
+            # Ensure 'length' is included
             if 'length' not in all_results:
                 all_results['length'] = TrendStrategy.length  # Assign current length
 
-            global_results_list.append(all_results)
+            global_results_list.append(all_results)  # Now appending a dict
 
         except ValueError as ve:
             st.error(f"No valid results found for {symbol}: {ve}")
