@@ -406,7 +406,9 @@ def plot_global_results(global_results_df):
     Parameters:
         global_results_df (pd.DataFrame): DataFrame containing all backtest results.
     """
-    grouped = global_results_df.groupby("length", as_index=False)["combined_score"].mean()
+    # Updated groupby operation
+    grouped = global_results_df.groupby("length")["combined_score"].mean().reset_index()
+    
     grouped.rename(columns={"combined_score": "avg_combined_score"}, inplace=True)
     best_idx = grouped["avg_combined_score"].idxmax()
     best_length = grouped.loc[best_idx, "length"]
