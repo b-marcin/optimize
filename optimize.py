@@ -3,7 +3,7 @@ import ccxt
 import ccxt.async_support as ccxt_async  # For asynchronous fetching
 import pandas as pd
 from backtesting import Backtest, Strategy
-from backtesting.lib import crossover, crossunder
+from backtesting.lib import crossover  # Removed crossunder import
 import time
 import warnings
 import matplotlib.pyplot as plt
@@ -301,7 +301,7 @@ class TrendStrategy(Strategy):
         close = pd.Series(self.data.Close)
 
         # -------------------------------
-        # Change 1: Align ATR Calculation with Pine Script
+        # Align ATR Calculation with Pine Script
         # -------------------------------
         # Original ATR Calculation:
         # window_atr = int(self.length * 2)  # Example: ATR window = 2 × length
@@ -309,9 +309,9 @@ class TrendStrategy(Strategy):
         # atr_adjusted = atr * self.atr_multiplier
 
         # Updated ATR Calculation to match Pine Script:
-        atr = calculate_atr(high, low, close, window=200)  # ATR with window=200
-        atr_sma = atr.rolling(window=200).mean()          # SMA over ATR with window=200
-        atr_adjusted = atr_sma * self.atr_multiplier     # Multiply by 0.8
+        atr = calculate_atr(high, low, close, window=200)          # ATR with window=200
+        atr_sma = atr.rolling(window=200).mean()                  # SMA over ATR with window=200
+        atr_adjusted = atr_sma * self.atr_multiplier             # Multiply by 0.8
 
         window_len = int(self.length)
         sma_high = high.rolling(window=window_len).mean() + atr_adjusted
@@ -416,14 +416,14 @@ def plot_global_results(global_results_df):
         global_results_df (pd.DataFrame): DataFrame containing all backtest results.
     """
     # -------------------------------
-    # Change 1: Check if 'length' column exists
+    # Check if 'length' column exists
     # -------------------------------
     if 'length' not in global_results_df.columns:
         st.error("The 'length' column is missing from the global results DataFrame.")
         st.stop()  # Stop further execution
 
     # -------------------------------
-    # Change 2: Modify groupby operation
+    # Modify groupby operation
     # -------------------------------
     grouped = global_results_df.groupby("length")["combined_score"].mean().reset_index()
 
@@ -615,7 +615,7 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
             all_results["symbol"] = symbol
 
             # -------------------------------
-            # Change 2: Ensure 'length' is included and convert to dict
+            # Ensure 'length' is included and convert to dict
             # -------------------------------
             # Convert Series to dictionary
             all_results = best_result.to_dict()
@@ -638,7 +638,7 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
         progress_bar.progress(symbol_counter / total_symbols)
 
     # -------------------------------
-    # Change 1: Correct Concatenation Method
+    # Correct Concatenation Method
     # -------------------------------
     if global_results_list:
         global_results_df = pd.DataFrame(global_results_list)  # Changed from pd.concat to pd.DataFrame
