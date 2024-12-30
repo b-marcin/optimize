@@ -3,7 +3,7 @@ import ccxt
 import ccxt.async_support as ccxt_async  # For asynchronous fetching
 import pandas as pd
 from backtesting import Backtest, Strategy
-from backtesting.lib import crossover  # Removed crossunder import
+from backtesting.lib import crossover, crossunder
 import time
 import warnings
 import matplotlib.pyplot as plt
@@ -300,14 +300,22 @@ class TrendStrategy(Strategy):
         low = pd.Series(self.data.Low)
         close = pd.Series(self.data.Close)
 
-        # Dynamic ATR window based on the current 'length'
-        window_atr = int(self.length * 2)  # Example: ATR window = 2 × length
-        atr = calculate_atr(high, low, close, window=window_atr)
-        atr_adjusted = atr * self.atr_multiplier
+        # -------------------------------
+        # Change 1: Align ATR Calculation with Pine Script
+        # -------------------------------
+        # Original ATR Calculation:
+        # window_atr = int(self.length * 2)  # Example: ATR window = 2 × length
+        # atr = calculate_atr(high, low, close, window=window_atr)
+        # atr_adjusted = atr * self.atr_multiplier
+
+        # Updated ATR Calculation to match Pine Script:
+        atr = calculate_atr(high, low, close, window=200)  # ATR with window=200
+        atr_sma = atr.rolling(window=200).mean()          # SMA over ATR with window=200
+        atr_adjusted = atr_sma * self.atr_multiplier     # Multiply by 0.8
 
         window_len = int(self.length)
         sma_high = high.rolling(window=window_len).mean() + atr_adjusted
-        sma_low = low.rolling(window_len).mean() - atr_adjusted
+        sma_low = low.rolling(window=window_len).mean() - atr_adjusted
 
         self.sma_high = self.I(lambda: sma_high)
         self.sma_low = self.I(lambda: sma_low)
