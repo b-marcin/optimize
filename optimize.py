@@ -532,7 +532,7 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
             # Extract and display trade details
             # Access 'trades' after running the backtest
             if hasattr(bt, 'trades'):
-                trades = bt.trades
+                trades = bt.trades.to_dataframe()  # Convert to DataFrame
             else:
                 trades = pd.DataFrame()
 
