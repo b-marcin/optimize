@@ -1,7 +1,7 @@
-backtesting
-ccxt
-matplotlib
-pandas
-requests
-seaborn
 streamlit
+ccxt
+backtesting
+pandas
+matplotlib
+seaborn
+scikit-learn
