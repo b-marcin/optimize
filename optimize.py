@@ -14,7 +14,7 @@ import asyncio
 warnings.filterwarnings("ignore")
 
 # ----------------------------------------
-# HELPER FUNCTIONS
+# HELPER FUNCTIONS -
 # ----------------------------------------
 
 def timeframe_to_pandas_freq(timeframe):
