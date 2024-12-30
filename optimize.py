@@ -3,7 +3,7 @@ import ccxt
 import ccxt.async_support as ccxt_async  # For asynchronous fetching
 import pandas as pd
 from backtesting import Backtest, Strategy
-from backtesting.lib import crossover, crossunder
+from backtesting.lib import crossover
 import time
 import warnings
 import matplotlib.pyplot as plt
@@ -80,24 +80,39 @@ def verify_data_completeness(data, timeframe):
         return False
     return True
 
-def calculate_atr(high, low, close, window=14):
+def calculate_atr(high, low, close, window=200):
     """
-    Calculates the Average True Range (ATR).
+    Calculates the Average True Range (ATR) and its SMA.
 
     Parameters:
         high (pd.Series): High prices.
         low (pd.Series): Low prices.
         close (pd.Series): Close prices.
-        window (int): Rolling window for ATR.
+        window (int): Rolling window for ATR and SMA.
 
     Returns:
-        pd.Series: ATR values.
+        pd.Series: ATR SMA values.
     """
     high_low = high - low
     high_close = (high - close.shift()).abs()
     low_close = (low - close.shift()).abs()
     true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    return true_range.rolling(window=window).mean()
+    atr = true_range.rolling(window=window).mean()
+    atr_sma = atr.rolling(window=window).mean()
+    return atr_sma
+
+def crossunder(a, b):
+    """
+    Detects crossunder between two series.
+
+    Parameters:
+        a (pd.Series): First series.
+        b (pd.Series): Second series.
+
+    Returns:
+        bool: True if crossunder occurred, False otherwise.
+    """
+    return a[-2] > b[-2] and a[-1] < b[-1]
 
 def safe_format(value, decimals=2):
     """
@@ -242,7 +257,9 @@ async def fetch_symbol_data(exchange_name, symbol, timeframe, length_max, max_re
             st.warning(f"There are missing data points for {symbol}.")
 
         # Validate data length
-        required_length = (length_max * 2) + 10  # window_atr = 2 × length_max + buffer
+        # ATR requires 200 periods, and SMA of ATR also requires 200 periods
+        # So total required periods = 200 + 200 + length_max + buffer
+        required_length = 400 + length_max + 10  # Adjust as needed
         if len(data) < required_length:
             st.warning(
                 f"Insufficient data retrieved for {symbol}. "
@@ -324,14 +341,13 @@ class TrendStrategy(Strategy):
         low = self.data.Low
         close = self.data.Close
 
-        # Dynamic ATR window based on the current 'length'
-        window_atr = self.length * 2  # Example: ATR window = 2 × length
-        atr = calculate_atr(high, low, close, window=window_atr)
-        atr_adjusted = atr * self.atr_multiplier
+        # Calculate ATR SMA as per TradingView script
+        atr_sma = calculate_atr(high, low, close, window=200)
+        atr_value = atr_sma * self.atr_multiplier
 
         window_len = self.length
-        sma_high = self.I(lambda: high.rolling(window=window_len).mean() + atr_adjusted)
-        sma_low = self.I(lambda: low.rolling(window=window_len).mean() - atr_adjusted)
+        sma_high = self.I(lambda: high.rolling(window=window_len).mean() + atr_value)
+        sma_low = self.I(lambda: low.rolling(window=window_len).mean() - atr_value)
 
         self.sma_high = sma_high
         self.sma_low = sma_low
@@ -361,6 +377,10 @@ def exhaustive_search(data, length_range):
         tuple: Best result as a Series and all results as a DataFrame.
     """
     results = []
+    scaler = StandardScaler()
+
+    # Collect metrics for normalization
+    metrics_list = []
 
     for length in length_range:
         TrendStrategy.length = length
@@ -392,9 +412,58 @@ def exhaustive_search(data, length_range):
         if pd.isna(sharpe) or pd.isna(sortino) or pd.isna(calmar):
             continue
 
+        # Collect metrics for normalization
+        metrics_list.append([
+            sharpe,
+            sortino,
+            calmar,
+            profit_factor if profit_factor else 0,
+            expectancy if expectancy else 0
+        ])
+
+    if not metrics_list:
+        raise ValueError("No valid metrics found during exhaustive search.")
+
+    # Fit scaler on collected metrics
+    scaler.fit(metrics_list)
+
+    # Re-run the exhaustive search to compute combined scores
+    for length in length_range:
+        TrendStrategy.length = length
+        bt = Backtest(
+            data,
+            TrendStrategy,
+            cash=1_000_000,
+            commission=0.002,
+            exclusive_orders=True
+        )
+        try:
+            stats = bt.run()
+        except Exception as e:
+            logger.error(f"Backtest failed for length {length}: {e}")
+            continue
+
+        sharpe = stats.get("Sharpe Ratio", None)
+        sortino = stats.get("Sortino Ratio", None)
+        calmar = stats.get("Calmar Ratio", None)
+        win_rate = stats.get("Win Rate [%]", None)
+        profit_factor = stats.get("Profit Factor", None)
+        avg_trade = stats.get("Avg Trade [%]", None)
+        expectancy = stats.get("Expectancy", None)
+        number_of_trades = stats.get("Total Trades", None)
+        recovery_factor = stats.get("Recovery Factor", None)
+
+        if pd.isna(sharpe) or pd.isna(sortino) or pd.isna(calmar):
+            continue
+
         # Normalize metrics
-        scaler = StandardScaler()
-        metrics_scaled = scaler.fit_transform([[sharpe, sortino, calmar, profit_factor if profit_factor else 0, expectancy if expectancy else 0]])
+        metrics_scaled = scaler.transform([[
+            sharpe,
+            sortino,
+            calmar,
+            profit_factor if profit_factor else 0,
+            expectancy if expectancy else 0
+        ]])
         scaled_sharpe, scaled_sortino, scaled_calmar, scaled_profit_factor, scaled_expectancy = metrics_scaled[0]
 
         # Calculate combined score with normalized metrics and weights
@@ -605,8 +674,6 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max, in
                     return [color] * len(row)
 
                 styled_trades = trades_display.style.apply(highlight_profits, axis=1)
-
-                # Display trades with pagination
                 st.dataframe(styled_trades, use_container_width=True)
 
                 # Enable CSV download of trades
