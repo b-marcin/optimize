@@ -406,9 +406,18 @@ def plot_global_results(global_results_df):
     Parameters:
         global_results_df (pd.DataFrame): DataFrame containing all backtest results.
     """
-    # Updated groupby operation
+    # -------------------------------
+    # Change 1: Check if 'length' column exists
+    # -------------------------------
+    if 'length' not in global_results_df.columns:
+        st.error("The 'length' column is missing from the global results DataFrame.")
+        st.stop()  # Stop further execution
+
+    # -------------------------------
+    # Change 2: Modify groupby operation
+    # -------------------------------
     grouped = global_results_df.groupby("length")["combined_score"].mean().reset_index()
-    
+
     grouped.rename(columns={"combined_score": "avg_combined_score"}, inplace=True)
     best_idx = grouped["avg_combined_score"].idxmax()
     best_length = grouped.loc[best_idx, "length"]
@@ -595,6 +604,13 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
 
             all_results = best_result.copy()
             all_results["symbol"] = symbol
+
+            # -------------------------------
+            # Change 3: Ensure 'length' is included
+            # -------------------------------
+            if 'length' not in all_results:
+                all_results['length'] = TrendStrategy.length  # Assign current length
+
             global_results_list.append(all_results)
 
         except ValueError as ve:
