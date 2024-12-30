@@ -142,7 +142,6 @@ async def fetch_symbol_data(exchange_name, symbol, timeframe, length_max, max_re
         return None
 
     # Determine the earliest possible 'since' timestamp
-    # For simplicity, we'll set a default start date (e.g., January 1, 2017)
     start_date = exchange.parse8601('2017-01-01T00:00:00Z')
     since = start_date
 
@@ -232,15 +231,6 @@ async def fetch_symbol_data(exchange_name, symbol, timeframe, length_max, max_re
 async def fetch_all_symbols_data(exchange_name, symbols, timeframe, length_max):
     """
     Asynchronously fetches data for all symbols concurrently.
-
-    Parameters:
-        exchange_name (str): Name of the exchange.
-        symbols (list): List of trading pair symbols.
-        timeframe (str): Timeframe for OHLCV data.
-        length_max (int): Maximum length parameter.
-
-    Returns:
-        list: List of DataFrames or None for each symbol.
     """
     tasks = [fetch_symbol_data(exchange_name, symbol, timeframe, length_max) for symbol in symbols]
     return await asyncio.gather(*tasks)
@@ -248,15 +238,6 @@ async def fetch_all_symbols_data(exchange_name, symbols, timeframe, length_max):
 def run_concurrent_fetch(exchange_name, symbols, timeframe, length_max):
     """
     Runs the asynchronous fetching of all symbols data.
-
-    Parameters:
-        exchange_name (str): Name of the exchange.
-        symbols (list): List of trading pair symbols.
-        timeframe (str): Timeframe for OHLCV data.
-        length_max (int): Maximum length parameter.
-
-    Returns:
-        list: List of DataFrames or None for each symbol.
     """
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -272,15 +253,6 @@ def run_concurrent_fetch(exchange_name, symbols, timeframe, length_max):
 def fetch_all_historical_data_cached(exchange_name, symbols, timeframe, length_max):
     """
     Cached function to fetch historical data for all symbols.
-
-    Parameters:
-        exchange_name (str): Name of the exchange.
-        symbols (list): List of trading pair symbols.
-        timeframe (str): Timeframe for OHLCV data.
-        length_max (int): Maximum length parameter.
-
-    Returns:
-        list: List of DataFrames or None for each symbol.
     """
     return run_concurrent_fetch(exchange_name, symbols, timeframe, length_max)
 
@@ -300,18 +272,10 @@ class TrendStrategy(Strategy):
         low = pd.Series(self.data.Low)
         close = pd.Series(self.data.Close)
 
-        # -------------------------------
-        # Align ATR Calculation with Pine Script
-        # -------------------------------
-        # Original ATR Calculation (commented out):
-        # window_atr = int(self.length * 2)  # Example: ATR window = 2 × length
-        # atr = calculate_atr(high, low, close, window=window_atr)
-        # atr_adjusted = atr * self.atr_multiplier
-
         # Updated ATR Calculation to match Pine Script:
-        atr = calculate_atr(high, low, close, window=200)   # ATR with window=200
-        atr_sma = atr.rolling(window=200).mean()            # SMA over ATR with window=200
-        atr_adjusted = atr_sma * self.atr_multiplier        # Multiply by 0.8
+        atr = calculate_atr(high, low, close, window=200)   # ATR(200)
+        atr_sma = atr.rolling(window=200).mean()            # SMA over ATR(200)
+        atr_adjusted = atr_sma * self.atr_multiplier        # multiplied by 0.8
 
         window_len = int(self.length)
         sma_high = high.rolling(window=window_len).mean() + atr_adjusted
@@ -337,14 +301,9 @@ class TrendStrategy(Strategy):
 def exhaustive_search(data, length_range):
     """
     Performs exhaustive search over a range of 'length' parameters to find the best strategy.
-
-    Parameters:
-        data (pd.DataFrame): Historical OHLCV data.
-        length_range (range): Range of 'length' parameters to test.
-
-    Returns:
-        tuple: Best result as a Series and all results as a DataFrame.
     """
+    from backtesting import Backtest
+
     results = []
 
     for length in length_range:
@@ -369,14 +328,14 @@ def exhaustive_search(data, length_range):
         number_of_trades = stats.get("Total Trades", None)
         recovery_factor = stats.get("Recovery Factor", None)
 
-        # Ensure essential metrics are present
+        # Ensure essential metrics are present (some strategies can fail or have no trades)
         if pd.isna(sharpe) or pd.isna(sortino) or pd.isna(calmar):
             continue
 
         # Calculate combined score with weights
         combined_score = sharpe * 0.3 + sortino * 0.3 + calmar * 0.2
         if profit_factor and profit_factor > 1:
-            combined_score += (profit_factor - 1) * 0.1  # Assuming profit_factor >1 is good
+            combined_score += (profit_factor - 1) * 0.1
         if expectancy:
             combined_score += expectancy * 0.1
 
@@ -411,17 +370,14 @@ def exhaustive_search(data, length_range):
 def plot_global_results(global_results_df):
     """
     Plots the average combined score by length across all symbols.
-
-    Parameters:
-        global_results_df (pd.DataFrame): DataFrame containing all backtest results.
     """
     if 'length' not in global_results_df.columns:
         st.error("The 'length' column is missing from the global results DataFrame.")
-        st.stop()  # Stop further execution
+        st.stop()
 
     grouped = global_results_df.groupby("length")["combined_score"].mean().reset_index()
-
     grouped.rename(columns={"combined_score": "avg_combined_score"}, inplace=True)
+
     best_idx = grouped["avg_combined_score"].idxmax()
     best_length = grouped.loc[best_idx, "length"]
     best_score = grouped.loc[best_idx, "avg_combined_score"]
@@ -452,14 +408,9 @@ def plot_global_results(global_results_df):
 def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
     """
     Runs backtests for all specified symbols and aggregates the results.
-
-    Parameters:
-        exchange_name (str): Name of the exchange.
-        symbols (list): List of trading pair symbols.
-        timeframe (str): Timeframe for OHLCV data.
-        length_range (range): Range of 'length' parameters to test.
-        length_max (int): Maximum 'length' parameter value.
     """
+    from backtesting import Backtest
+
     global_results_list = []
     total_symbols = len(symbols)
     progress_bar = st.progress(0)
@@ -481,6 +432,8 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
         st.write("Analyzing all 'length' parameters...")
         try:
             best_result, all_results = exhaustive_search(data, length_range)
+
+            # Allow CSV download of the entire analysis
             csv = all_results.to_csv(index=False)
             st.download_button(
                 label="Download Results CSV",
@@ -530,57 +483,101 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
                 st.write(f"- **{metric}**: {formatted_value}")
 
             # -------------------------------
-            # CHANGED BLOCK: Properly Retrieve Trades
+            # Retrieve Trades Safely
             # -------------------------------
-            # Instead of using `bt.trades`, we pull from `final_stats._trades`.
             trades = final_stats._trades if hasattr(final_stats, '_trades') else pd.DataFrame()
             if not isinstance(trades, pd.DataFrame):
                 trades = trades.to_dataframe()
 
-            # Now `trades` should contain the actual trades if any exist.
             if not trades.empty:
+                # Safely rename columns to unify naming across versions of backtesting.py
+                # For example, older versions might use 'EntryTime', 'ExitTime', 'PnL%', etc.
+                rename_map = {}
+                col_set = set(trades.columns)
+
+                # Time columns
+                if 'EntryTime' in col_set:
+                    rename_map['EntryTime'] = 'Entry Time'
+                if 'ExitTime' in col_set:
+                    rename_map['ExitTime'] = 'Exit Time'
+
+                # Price columns
+                if 'EntryPrice' in col_set:
+                    rename_map['EntryPrice'] = 'Entry Price'
+                if 'ExitPrice' in col_set:
+                    rename_map['ExitPrice'] = 'Exit Price'
+
+                # Size / Shares
+                if 'Shares' in col_set:
+                    rename_map['Shares'] = 'Size'
+
+                # PnL columns
+                if 'PnL%' in col_set:
+                    rename_map['PnL%'] = 'Profit (%)'
+                if 'PnL' in col_set:
+                    rename_map['PnL'] = 'Profit ($)'
+
                 trades_display = trades.copy()
-                trades_display['Entry Time'] = pd.to_datetime(trades_display['Entry Time'], unit='ms')
-                trades_display['Exit Time'] = pd.to_datetime(trades_display['Exit Time'], unit='ms')
-                trades_display['Profit (%)'] = trades_display['Profit (%)'].round(2)
-                trades_display['Return (%)'] = trades_display['Return [%]'].round(2)
-                trades_display = trades_display[[
-                    'Entry Time', 'Exit Time', 'Size', 'Entry Price', 'Exit Price',
-                    'Profit (%)', 'Return (%)'
-                ]]
-                trades_display.rename(columns={
-                    'Size': 'Position Size',
-                    'Entry Price': 'Buy Price',
-                    'Exit Price': 'Sell Price'
-                }, inplace=True)
+                trades_display.rename(columns=rename_map, inplace=True)
 
-                st.markdown("**Aggregated Trade Statistics:**")
-                total_trades = len(trades_display)
-                profitable_trades = len(trades_display[trades_display['Profit (%)'] > 0])
-                losing_trades = len(trades_display[trades_display['Profit (%)'] <= 0])
-                total_profit = trades_display['Profit (%)'].sum()
-                average_profit = trades_display['Profit (%)'].mean()
-                average_loss = trades_display[trades_display['Profit (%)'] < 0]['Profit (%)'].mean()
-                profit_factor = final_stats.get("Profit Factor", "N/A")
-                expectancy = final_stats.get("Expectancy", "N/A")
+                # Convert times if they exist
+                if 'Entry Time' in trades_display.columns:
+                    trades_display['Entry Time'] = pd.to_datetime(
+                        trades_display['Entry Time'], unit='ms', errors='coerce'
+                    )
+                if 'Exit Time' in trades_display.columns:
+                    trades_display['Exit Time'] = pd.to_datetime(
+                        trades_display['Exit Time'], unit='ms', errors='coerce'
+                    )
 
-                st.write(f"- **Total Trades**: {total_trades}")
-                st.write(f"- **Profitable Trades**: {profitable_trades} "
-                         f"({(profitable_trades / total_trades * 100):.2f}%)")
-                st.write(f"- **Losing Trades**: {losing_trades} "
-                         f"({(losing_trades / total_trades * 100):.2f}%)")
-                st.write(f"- **Total Profit (%)**: {total_profit:.2f}%")
-                st.write(f"- **Average Profit per Trade (%)**: {average_profit:.2f}%")
-                st.write(f"- **Average Loss per Trade (%)**: {average_loss:.2f}%")
-                st.write(f"- **Profit Factor**: {profit_factor}")
-                st.write(f"- **Expectancy**: {expectancy:.2f}" if expectancy != "N/A" else f"- **Expectancy**: N/A")
+                # Round profit columns if they exist
+                if 'Profit (%)' in trades_display.columns:
+                    trades_display['Profit (%)'] = trades_display['Profit (%)'].round(2)
+                if 'Profit ($)' in trades_display.columns:
+                    trades_display['Profit ($)'] = trades_display['Profit ($)'].round(2)
 
-                st.markdown("**Trade Log:**")
+                # Final subset (only include columns that actually exist)
+                possible_cols = [
+                    'Entry Time', 'Exit Time', 'Size',
+                    'Entry Price', 'Exit Price', 'Profit (%)', 'Profit ($)'
+                ]
+                columns_to_show = [c for c in possible_cols if c in trades_display.columns]
+                trades_display = trades_display[columns_to_show]
 
+                # Show aggregated stats if 'Profit (%)' is available
+                if 'Profit (%)' in trades_display.columns:
+                    st.markdown("**Aggregated Trade Statistics:**")
+                    total_trades = len(trades_display)
+                    profitable_trades = len(trades_display[trades_display['Profit (%)'] > 0])
+                    losing_trades = len(trades_display[trades_display['Profit (%)'] <= 0])
+                    total_profit = trades_display['Profit (%)'].sum()
+                    average_profit = trades_display['Profit (%)'].mean()
+                    average_loss = trades_display[trades_display['Profit (%)'] < 0]['Profit (%)'].mean() \
+                                   if losing_trades > 0 else float('nan')
+                    profit_factor = final_stats.get("Profit Factor", "N/A")
+                    expectancy = final_stats.get("Expectancy", "N/A")
+
+                    st.write(f"- **Total Trades**: {total_trades}")
+                    if total_trades > 0:
+                        st.write(f"- **Profitable Trades**: {profitable_trades} "
+                                 f"({(profitable_trades / total_trades * 100):.2f}%)")
+                        st.write(f"- **Losing Trades**: {losing_trades} "
+                                 f"({(losing_trades / total_trades * 100):.2f}%)")
+                        st.write(f"- **Total Profit (%)**: {total_profit:.2f}%")
+                        st.write(f"- **Average Profit per Trade (%)**: {average_profit:.2f}%")
+                        if not pd.isna(average_loss):
+                            st.write(f"- **Average Loss per Trade (%)**: {average_loss:.2f}%")
+                        st.write(f"- **Profit Factor**: {profit_factor}")
+                        if expectancy != "N/A":
+                            st.write(f"- **Expectancy**: {float(expectancy):.2f}")
+                        else:
+                            st.write(f"- **Expectancy**: N/A")
+
+                # Highlight profitable vs. losing trades
                 def highlight_profits(row):
-                    if row['Profit (%)'] > 0:
+                    if 'Profit (%)' in row and row['Profit (%)'] > 0:
                         color = 'background-color: #d4edda'  # Light green
-                    elif row['Profit (%)'] < 0:
+                    elif 'Profit (%)' in row and row['Profit (%)'] < 0:
                         color = 'background-color: #f8d7da'  # Light red
                     else:
                         color = ''
@@ -588,9 +585,10 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
 
                 styled_trades = trades_display.style.apply(highlight_profits, axis=1)
                 trades_html = styled_trades.render()
+                st.markdown("**Trade Log:**")
                 st.markdown(trades_html, unsafe_allow_html=True)
 
-                # Enable CSV download of trades
+                # Allow CSV download of trades
                 trades_csv = trades_display.to_csv(index=False)
                 st.download_button(
                     label="Download Trades CSV",
@@ -601,27 +599,19 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
             else:
                 st.info("No trades were executed for this symbol.")
 
-            all_results_copy = best_result.copy()
-            all_results_copy["symbol"] = symbol
-
-            # Convert Series to dictionary
+            # Prepare to store best results
             all_results_copy = best_result.to_dict()
-
-            # Add 'symbol' key
             all_results_copy["symbol"] = symbol
-
-            # Ensure 'length' is included
             if 'length' not in all_results_copy:
                 all_results_copy['length'] = TrendStrategy.length
 
-            global_results_list.append(all_results_copy)  # Append dict of best_result + symbol
+            global_results_list.append(all_results_copy)
 
         except ValueError as ve:
             st.error(f"No valid results found for {symbol}: {ve}")
         except Exception as e:
             st.error(f"An unexpected error occurred while processing {symbol}: {e}")
 
-        # Update progress bar
         progress_bar.progress(symbol_counter / total_symbols)
 
     if global_results_list:
@@ -651,7 +641,7 @@ def main():
     # Symbols Input
     symbols_input = st.sidebar.text_input(
         "Enter Symbols (comma-separated, e.g., BTC/USDT,ETH/USDT)",
-        "BTC/USDT,ETH/USDT,XRP/USDT,SOL/USDT,DOT/USDT,AVAX/USDT,ARB/USDT,UNI/USDT,SUI/USDT"
+        "BTC/USDT,ETH/USDT"
     )
     symbols = [symbol.strip().upper() for symbol in symbols_input.split(",")]
 
@@ -665,7 +655,6 @@ def main():
     process_all = st.sidebar.checkbox("Process All Lengths (10-1000)")
 
     if not process_all:
-        # Length Range Slider
         length_min, length_max = st.sidebar.slider(
             "Select Length Range",
             min_value=10,
@@ -676,6 +665,7 @@ def main():
     else:
         st.sidebar.info("Processing all lengths from 10 to 1000. This may take some time.")
         length_range = range(10, 1001)
+        length_max = 1000
 
     if st.sidebar.button("🚀 Run Backtest"):
         run_backtest(exchange_name, symbols, timeframe, length_range, length_max=1000)
@@ -683,6 +673,5 @@ def main():
 # -------------------------------
 # Entry Point
 # -------------------------------
-
 if __name__ == "__main__":
     main()
