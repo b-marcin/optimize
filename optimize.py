@@ -574,7 +574,8 @@ def main():
 
     symbols_input = st.sidebar.text_input(
         "Enter Symbols (comma-separated)",
-        "BTC/USDT,ETH/USDT"
+        "BTC/USDT,ETH/USDT,XRP/USDT,SOL/USDT,DOT/USDT,AVAX/USDT,ARB/USDT,UNI/USDT,SUI/USDT"
+
     )
     symbols = [s.strip().upper() for s in symbols_input.split(",")]
 
