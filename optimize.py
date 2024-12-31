@@ -74,7 +74,11 @@ def calculate_atr(high, low, close, window=14):
 # ASYNC DATA FETCHING
 # ----------------------------------------
 
-async def fetch_symbol_data(exchange_name, symbol, timeframe, length_max, max_retries=5, backoff_factor=2):
+async def fetch_symbol_data(
+    exchange_name, symbol, timeframe, length_max,
+    override_check=False,  # <-- ADDED parameter
+    max_retries=5, backoff_factor=2
+):
     """
     Asynchronously fetches all historical OHLCV data for a given symbol.
     """
@@ -167,21 +171,34 @@ async def fetch_symbol_data(exchange_name, symbol, timeframe, length_max, max_re
 
     required_length = (length_max * 2) + 10
     if len(data) < required_length:
-        st.warning(
-            f"Only {len(data)} candles for {symbol}, need >= {required_length} for full ATR warm-up."
-        )
-        return None
+        # If override is NOT checked, do the original logic:
+        if not override_check:
+            st.warning(
+                f"Only {len(data)} candles for {symbol}, need ≥ {required_length} for full ATR warm-up."
+            )
+            return None
+        else:
+            # If override IS checked, continue but warn
+            st.warning(
+                f"Data for {symbol} is insufficient ({len(data)} vs {required_length}), "
+                f"but override is enabled. Proceeding anyway."
+            )
 
     return data
 
-async def fetch_all_symbols_data(exchange_name, symbols, timeframe, length_max):
-    tasks = [fetch_symbol_data(exchange_name, s, timeframe, length_max) for s in symbols]
+async def fetch_all_symbols_data(exchange_name, symbols, timeframe, length_max, override_check=False):
+    # Pass override_check to each fetch
+    tasks = [
+        fetch_symbol_data(exchange_name, s, timeframe, length_max, override_check=override_check)
+        for s in symbols
+    ]
     return await asyncio.gather(*tasks)
 
-def run_concurrent_fetch(exchange_name, symbols, timeframe, length_max):
+def run_concurrent_fetch(exchange_name, symbols, timeframe, length_max, override_check=False):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    data_list = loop.run_until_complete(fetch_all_symbols_data(exchange_name, symbols, timeframe, length_max))
+    # Pass override_check here too
+    data_list = loop.run_until_complete(fetch_all_symbols_data(exchange_name, symbols, timeframe, length_max, override_check))
     loop.close()
     return data_list
 
@@ -190,8 +207,9 @@ def run_concurrent_fetch(exchange_name, symbols, timeframe, length_max):
 # ----------------------------------------
 
 @st.cache_data(show_spinner=True, ttl=86400)
-def fetch_all_historical_data_cached(exchange_name, symbols, timeframe, length_max):
-    return run_concurrent_fetch(exchange_name, symbols, timeframe, length_max)
+def fetch_all_historical_data_cached(exchange_name, symbols, timeframe, length_max, override_check=False):
+    # Pass override_check to run_concurrent_fetch
+    return run_concurrent_fetch(exchange_name, symbols, timeframe, length_max, override_check)
 
 # ----------------------------------------
 # PINE-REPLICATED STRATEGY
@@ -358,14 +376,15 @@ def plot_global_results(global_results_df):
 # BACKTEST RUNNER
 # ----------------------------------------
 
-def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
+def run_backtest(exchange_name, symbols, timeframe, length_range, length_max, override_check=False):
     global_results_list = []
     total_symbols = len(symbols)
     progress_bar = st.progress(0)
     symbol_counter = 0
 
     st.write("Fetching data for all symbols...")
-    data_list = fetch_all_historical_data_cached(exchange_name, symbols, timeframe, length_max)
+    # Pass override_check here
+    data_list = fetch_all_historical_data_cached(exchange_name, symbols, timeframe, length_max, override_check)
 
     for idx, symbol in enumerate(symbols):
         symbol_counter += 1
@@ -543,7 +562,6 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max):
 # ----------------------------------------
 # STREAMLIT UI
 # ----------------------------------------
-
 def main():
     st.title("📈 Pine-Replicated Trend Strategy [Multi-Asset]")
 
@@ -579,8 +597,18 @@ def main():
         length_range = range(10, 1001)
         length_max = 1000
 
+    # --- NEW override checkbox for insufficient data
+    override_check = st.sidebar.checkbox("Override Minimum Data Requirement?", value=False)
+
     if st.sidebar.button("🚀 Run Backtest"):
-        run_backtest(exchange_name, symbols, timeframe, length_range, length_max=1000)
+        run_backtest(
+            exchange_name,
+            symbols,
+            timeframe,
+            length_range,
+            length_max=length_max,
+            override_check=override_check  # Pass it down
+        )
 
 if __name__ == "__main__":
     main()
