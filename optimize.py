@@ -417,6 +417,8 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max, ov
                 exclusive_orders=True
             )
             final_stats = bt.run()
+            st.write(final_stats) //added to test
+
 
             st.markdown("**Performance Metrics:**")
             def safe_fmt(v, d=2):
