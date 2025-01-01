@@ -560,7 +560,7 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max, ov
 # STREAMLIT UI
 # ----------------------------------------
 def main():
-    st.title("📈 Pine-Replicated Trend Strategy [Multi-Asset]")
+    st.title("📈 Optimal Trend Length Calculator")
 
     st.sidebar.header("🔧 Configuration")
 
