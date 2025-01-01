@@ -474,30 +474,40 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max, ov
                         trades_display['Exit Time'], unit='ms', errors='coerce'
                     )
 
+                # Calculate % Return
+                if 'Entry Price' in trades_display.columns and 'Exit Price' in trades_display.columns:
+                    trades_display['% Return'] = ((trades_display['Exit Price'] - trades_display['Entry Price']) / trades_display['Entry Price']) * 100
+                    trades_display['% Return'] = trades_display['% Return'].round(2)
+
                 # Round profit columns
                 if 'Profit (%)' in trades_display.columns:
                     trades_display['Profit (%)'] = trades_display['Profit (%)'].round(2)
                 if 'Profit ($)' in trades_display.columns:
                     trades_display['Profit ($)'] = trades_display['Profit ($)'].round(2)
 
+                # Optional: Calculate Holding Time in minutes
+                if 'Entry Time' in trades_display.columns and 'Exit Time' in trades_display.columns:
+                    trades_display['Holding Time (min)'] = (trades_display['Exit Time'] - trades_display['Entry Time']).dt.total_seconds() / 60
+                    trades_display['Holding Time (min)'] = trades_display['Holding Time (min)'].round(2)
+
                 # Final subset
                 possible_cols = [
                     'Entry Time', 'Exit Time', 'Size',
-                    'Entry Price', 'Exit Price', 'Profit (%)', 'Profit ($)'
+                    'Entry Price', 'Exit Price', '% Return', 'Profit (%)', 'Profit ($)', 'Holding Time (min)'
                 ]
                 final_cols = [c for c in possible_cols if c in trades_display.columns]
                 trades_display = trades_display[final_cols]
 
                 # Show aggregated stats if "Profit (%)" is present
-                if 'Profit (%)' in trades_display.columns:
+                if 'Profit (%)' in trades_display.columns and '% Return' in trades_display.columns:
                     st.markdown("**Aggregated Trade Stats:**")
                     total_trades = len(trades_display)
-                    profitable_trades = len(trades_display[trades_display['Profit (%)'] > 0])
-                    losing_trades = len(trades_display[trades_display['Profit (%)'] <= 0])
-                    total_profit = trades_display['Profit (%)'].sum()
-                    avg_profit = trades_display['Profit (%)'].mean()
+                    profitable_trades = len(trades_display[trades_display['% Return'] > 0])
+                    losing_trades = len(trades_display[trades_display['% Return'] <= 0])
+                    total_profit = trades_display['% Return'].sum()
+                    avg_profit = trades_display['% Return'].mean()
                     avg_loss = (
-                        trades_display.loc[trades_display['Profit (%)'] < 0, 'Profit (%)'].mean()
+                        trades_display.loc[trades_display['% Return'] < 0, '% Return'].mean()
                         if losing_trades > 0 else float('nan')
                     )
 
@@ -507,25 +517,35 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max, ov
                                  f"({profitable_trades / total_trades * 100:.2f}%)")
                         st.write(f"- **Losing Trades**: {losing_trades} "
                                  f"({losing_trades / total_trades * 100:.2f}%)")
-                        st.write(f"- **Total Profit (%)**: {total_profit:.2f}%")
-                        st.write(f"- **Average Profit per Trade (%)**: {avg_profit:.2f}%")
+                        st.write(f"- **Total % Return**: {total_profit:.2f}%")
+                        st.write(f"- **Average % Return per Trade**: {avg_profit:.2f}%")
                         if not pd.isna(avg_loss):
-                            st.write(f"- **Average Loss per Trade (%)**: {avg_loss:.2f}%")
+                            st.write(f"- **Average Loss per Trade (%):** {avg_loss:.2f}%")
 
+                # Define a function to highlight profits
                 def highlight_profits(row):
-                    if 'Profit (%)' in row and row['Profit (%)'] > 0:
+                    if '% Return' in row and row['% Return'] > 0:
                         return ['background-color: #d4edda'] * len(row)
-                    elif 'Profit (%)' in row and row['Profit (%)'] < 0:
+                    elif '% Return' in row and row['% Return'] < 0:
                         return ['background-color: #f8d7da'] * len(row)
                     else:
                         return [''] * len(row)
 
-                styled_trades = trades_display.style.apply(highlight_profits, axis=1)
+                styled_trades = trades_display.style.apply(highlight_profits, axis=1)\
+                    .set_properties(**{
+                        'text-align': 'center',
+                        'border': '1px solid black'
+                    })\
+                    .set_table_styles([{
+                        'selector': 'th',
+                        'props': [('background-color', '#f2f2f2'), ('color', 'black'), ('font-weight', 'bold')]
+                    }])
+
                 trades_html = styled_trades.to_html()
                 st.markdown("**Trade Log:**")
                 st.markdown(trades_html, unsafe_allow_html=True)
 
-                # Download trades
+                # Download trades with the new columns
                 trades_csv = trades_display.to_csv(index=False)
                 st.download_button(
                     label="Download Trades CSV",
