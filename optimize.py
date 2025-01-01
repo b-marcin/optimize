@@ -606,8 +606,8 @@ def main():
         length_min, length_max = st.sidebar.slider(
             "Select Length Range",
             min_value=10,
-            max_value=1000,
-            value=(10, 200)
+            max_value=300,
+            value=(10, 250)
         )
         length_range = range(length_min, length_max + 1)
     else:
