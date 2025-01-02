@@ -119,6 +119,28 @@ async def fetch_symbol_data(
 ):
     """
     Enhanced fetch function with better error handling and data quality checks.
+    
+    Parameters:
+    -----------
+    exchange_name : str
+        Name of the exchange (e.g., 'binance', 'kraken')
+    symbol : str
+        Trading pair symbol (e.g., 'BTC/USDT')
+    timeframe : str
+        Candle timeframe (e.g., '1h', '4h', '1d')
+    length_max : int
+        Maximum lookback period for calculations
+    override_check : bool
+        Whether to override minimum data length check
+    max_retries : int
+        Maximum number of retry attempts for failed requests
+    backoff_factor : int
+        Factor to increase wait time between retries
+        
+    Returns:
+    --------
+    pd.DataFrame or None
+        Processed OHLCV data if successful, None otherwise
     """
     exchange_class = getattr(ccxt_async, exchange_name, None)
     if exchange_class is None:
@@ -131,7 +153,7 @@ async def fetch_symbol_data(
     })
 
     all_data = []
-    limit = 1000
+    limit = 1000  # Maximum number of candles per request
 
     try:
         st.write(f"Loading markets for {exchange_name}...")
@@ -146,6 +168,7 @@ async def fetch_symbol_data(
         await exchange.close()
         return None
 
+    # Set initial parameters for data fetching
     start_date = exchange.parse8601('2017-01-01T00:00:00Z')
     since = start_date
     max_timestamp = exchange.milliseconds()
@@ -155,27 +178,33 @@ async def fetch_symbol_data(
 
     while True:
         try:
+            # Fetch OHLCV data
             ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
             if not ohlcv:
                 st.write(f"No more data returned for {symbol}.")
                 break
 
+            # Check for duplicate or overlapping data
             if all_data and ohlcv[0][0] <= all_data[-1][0]:
                 st.warning(f"Duplicate or overlapping data for {symbol}.")
                 break
 
             all_data.extend(ohlcv)
             latest_timestamp = ohlcv[-1][0]
+            
+            # Progress update
             st.write(
                 f"Fetched {len(all_data)} candles for {symbol}. "
                 f"Latest date: {pd.to_datetime(latest_timestamp, unit='ms')}"
             )
 
+            # Prepare for next iteration
             since = latest_timestamp + 1
             if since > max_timestamp:
                 st.write(f"Reached current timestamp for {symbol}.")
                 break
 
+            # Respect exchange rate limits
             await asyncio.sleep(exchange.rateLimit / 1000)
 
         except ccxt.NetworkError as e:
@@ -212,12 +241,13 @@ async def fetch_symbol_data(
         Data Summary for {symbol}:
         - Time Range: {data.index.min()} to {data.index.max()}
         - Total Periods: {len(data)}
-        - Trading Days: {len(data.index.date.unique())}
+        - Trading Days: {len(pd.Series(data.index.date).unique())}
         """)
         
         # Verify completeness with enhanced reporting
         verify_data_completeness(data, timeframe)
         
+        # Check for minimum required data length
         required_length = (length_max * 2) + 10
         if len(data) < required_length and not override_check:
             st.warning(
@@ -230,7 +260,6 @@ async def fetch_symbol_data(
     except Exception as e:
         st.error(f"Error processing {symbol}: {str(e)}")
         return None
-
 async def fetch_all_symbols_data(exchange_name, symbols, timeframe, length_max, override_check=False):
     tasks = [
         fetch_symbol_data(exchange_name, s, timeframe, length_max, override_check=override_check)
