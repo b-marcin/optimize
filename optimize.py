@@ -37,6 +37,7 @@ def timeframe_to_pandas_freq(timeframe):
 def verify_data_completeness(data, timeframe):
     """
     Enhanced verification of data completeness with detailed reporting.
+    Handles both pandas Series and numpy array inputs.
     """
     freq = timeframe_to_pandas_freq(timeframe)
     expected_index = pd.date_range(start=data.index.min(), end=data.index.max(), freq=freq)
@@ -48,12 +49,15 @@ def verify_data_completeness(data, timeframe):
         gaps = missing_series.diff() > pd.Timedelta(hours=4 if timeframe == '4h' else 24)
         gap_starts = missing_series[gaps].index
         
+        # Convert index to pandas DatetimeIndex if needed
+        trading_days = pd.DatetimeIndex(data.index).normalize().unique()
+        
         st.warning(f"""Data Quality Report:
         - Total missing periods: {len(missing)}
         - Number of gaps: {len(gap_starts)}
         - First missing: {missing[0]}
         - Last missing: {missing[-1]}
-        - Trading Days: {len(data.index.normalize().unique())}
+        - Trading Days: {len(trading_days)}
         """)
         
         # Display gaps if there are any
