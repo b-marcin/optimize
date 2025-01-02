@@ -17,44 +17,6 @@ warnings.filterwarnings("ignore")
 # HELPER FUNCTIONS
 # ----------------------------------------
 
-def calculate_trade_drawdowns(data, trades_df):
-    """
-    Calculate maximum drawdown for each trade from entry point to exit point.
-    
-    Parameters:
-    data (pd.DataFrame): OHLCV data with datetime index
-    trades_df (pd.DataFrame): DataFrame containing trade information
-    
-    Returns:
-    pd.Series: Series containing maximum drawdown percentage for each trade
-    """
-    drawdowns = []
-    
-    for idx, trade in trades_df.iterrows():
-        entry_time = pd.to_datetime(trade['Entry Time'])
-        exit_time = pd.to_datetime(trade['Exit Time'])
-        entry_price = trade['Entry Price']
-        
-        # Get all prices between entry and exit
-        mask = (data.index >= entry_time) & (data.index <= exit_time)
-        trade_period = data[mask]
-        
-        if trade_period.empty:
-            drawdowns.append(0.0)
-            continue
-            
-        # Calculate drawdown based on trade direction
-        if trade['Size'] > 0:  # Long trade
-            lowest_point = trade_period['Low'].min()
-            max_drawdown = ((lowest_point - entry_price) / entry_price) * 100
-        else:  # Short trade
-            highest_point = trade_period['High'].max()
-            max_drawdown = ((entry_price - highest_point) / entry_price) * 100
-            
-        drawdowns.append(max_drawdown)
-    
-    return pd.Series(drawdowns, index=trades_df.index)
-
 def timeframe_to_pandas_freq(timeframe):
     """
     Converts a ccxt timeframe string to a Pandas frequency string.
@@ -302,13 +264,13 @@ def fetch_all_historical_data_cached(exchange_name, symbols, timeframe, length_m
 # ----------------------------------------
 # STRATEGY IMPLEMENTATION
 # ----------------------------------------
+
 class PineReplicatedStrategy(Strategy):
     length = 10
     atr_window = 200
     atr_multiplier = 0.8
 
     def init(self):
-        # Existing initialization code...
         high = pd.Series(self.data.High)
         low = pd.Series(self.data.Low)
         close = pd.Series(self.data.Close)
@@ -325,65 +287,20 @@ class PineReplicatedStrategy(Strategy):
         self.sma_low = self.I(lambda: sma_of_low - self.atr_value)
 
         self.current_trend = False
-        
-        # Track maximum drawdown for current trade
-        self._entry_price = None
-        self._max_drawdown = 0
 
     def next(self):
-        # Existing trading logic...
         old_trend = self.current_trend
 
         if pine_crossover(self.data.Close, self.sma_high):
             self.current_trend = True
-            if not self.position:
-                self._entry_price = self.data.Close[-1]
-                self._max_drawdown = 0
-                self.buy()
-                
         elif pine_crossunder(self.data.Close, self.sma_low):
             self.current_trend = False
-            if self.position:
-                self.position.close()
-                
-        # Update maximum drawdown if in a position
-        if self.position:
-            if self.position.is_long:
-                current_drawdown = ((self.data.Low[-1] - self._entry_price) / self._entry_price) * 100
-            else:
-                current_drawdown = ((self._entry_price - self.data.High[-1]) / self._entry_price) * 100
-                
-            self._max_drawdown = min(self._max_drawdown, current_drawdown)
 
-def enhance_trade_analysis(trades_df, data):
-    """
-    Add drawdown analysis to trade statistics display.
-    """
-    # Calculate drawdowns for all trades
-    drawdowns = calculate_trade_drawdowns(data, trades_df)
-    trades_df['Max Drawdown (%)'] = drawdowns
-    
-    # Add summary statistics
-    avg_drawdown = drawdowns.mean()
-    worst_drawdown = drawdowns.min()
-    
-    st.markdown("### Drawdown Analysis")
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.metric("Average Trade Drawdown", f"{avg_drawdown:.2f}%")
-    with col2:
-        st.metric("Worst Trade Drawdown", f"{worst_drawdown:.2f}%")
-    
-    # Create drawdown distribution plot
-    fig, ax = plt.subplots(figsize=(10, 6))
-    sns.histplot(drawdowns, bins=30, kde=True, ax=ax)
-    ax.set_title("Trade Drawdown Distribution")
-    ax.set_xlabel("Maximum Drawdown (%)")
-    ax.set_ylabel("Frequency")
-    st.pyplot(fig)
-    
-    return trades_df
+        if self.current_trend != old_trend:
+            if self.current_trend:
+                self.buy()
+            else:
+                self.position.close()
 
 # ----------------------------------------
 # BACKTEST AND ANALYSIS
