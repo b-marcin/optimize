@@ -297,7 +297,7 @@ class PineReplicatedStrategy(Strategy):
 
 def run_backtest(exchange_name, symbols, timeframe, length_range, length_max, override_check=False):
     """
-    Runs backtests for all symbols and analyzes results.
+    Runs backtests for all symbols and analyzes results with enhanced visualization.
     """
     global_results_list = []
     total_symbols = len(symbols)
@@ -439,6 +439,16 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max, ov
                         st.write(f"- **Average % Return per Trade**: {avg_profit:.2f}%")
                         if not pd.isna(avg_loss):
                             st.write(f"- **Average Loss per Trade (%)**: {avg_loss:.2f}%")
+                
+                # Add enhanced visualization
+                st.header("📊 Enhanced Trade Analysis")
+                display_enhanced_metrics(trades_display)
+                
+                try:
+                    fig = plot_strategy_analysis(trades_display, stats)
+                    st.pyplot(fig)
+                except Exception as e:
+                    st.error(f"Error creating visualizations: {str(e)}")
 
                 # Style and display trades table
                 def highlight_profits(row):
@@ -463,7 +473,7 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max, ov
                 st.markdown("**Trade Log:**")
                 st.markdown(trades_html, unsafe_allow_html=True)
 
-                # Provide download option for trades
+                # Provide download options
                 csv_trades = trades_display.to_csv(index=False)
                 st.download_button(
                     label="Download Trades CSV",
@@ -491,7 +501,6 @@ def run_backtest(exchange_name, symbols, timeframe, length_range, length_max, ov
         plot_global_results(global_df)
     else:
         st.error("No results to plot. Possibly no trades were found for any symbol.")
-
 def exhaustive_search(data, length_range):
     results = []
 
@@ -728,6 +737,140 @@ def plot_timeframe_comparison(results_dict):
         plt.tight_layout()
         st.pyplot(fig)
         plt.close()
+
+def plot_strategy_analysis(trades_df, stats):
+    """
+    Creates comprehensive strategy visualization with multiple subplots.
+    """
+    if trades_df.empty:
+        st.warning("No trades to visualize.")
+        return
+        
+    # Convert Entry Time if needed
+    if 'Entry Time' in trades_df.columns and not isinstance(trades_df['Entry Time'].iloc[0], pd.Timestamp):
+        trades_df['Entry Time'] = pd.to_datetime(trades_df['Entry Time'])
+        
+    # Create figure with subplots
+    fig = plt.figure(figsize=(20, 15))
+    gs = fig.add_gridspec(3, 2, height_ratios=[1, 1, 1])
+
+    # 1. Returns Distribution
+    ax1 = fig.add_subplot(gs[0, 0])
+    returns = trades_df['% Return'] if '% Return' in trades_df.columns else trades_df['Profit (%)']
+    sns.histplot(returns, kde=True, ax=ax1, color='blue', alpha=0.6)
+    ax1.axvline(x=0, color='r', linestyle='--', alpha=0.5)
+    ax1.set_title('Returns Distribution')
+    ax1.set_xlabel('Return %')
+    ax1.set_ylabel('Frequency')
+
+    # 2. Cumulative Returns
+    ax2 = fig.add_subplot(gs[0, 1])
+    cumulative_returns = (1 + returns/100).cumprod()
+    ax2.plot(range(len(cumulative_returns)), cumulative_returns, color='green')
+    ax2.set_title('Cumulative Returns Growth')
+    ax2.set_xlabel('Trade Number')
+    ax2.set_ylabel('Growth Multiple')
+    ax2.grid(True)
+
+    # 3. Monthly Performance Heatmap
+    ax3 = fig.add_subplot(gs[1, :])
+    monthly_returns = trades_df.set_index('Entry Time')['% Return'].resample('M').sum()
+    monthly_returns = monthly_returns.to_frame().pivot_table(
+        index=monthly_returns.index.year,
+        columns=monthly_returns.index.month,
+        values='% Return'
+    )
+    sns.heatmap(monthly_returns, cmap='RdYlGn', center=0, ax=ax3, annot=True, fmt='.1f')
+    ax3.set_title('Monthly Returns Heatmap (%)')
+    ax3.set_xlabel('Month')
+    ax3.set_ylabel('Year')
+
+    # 4. Trade Duration Analysis
+    ax4 = fig.add_subplot(gs[2, 0])
+    if 'Holding Time (min)' in trades_df.columns:
+        holding_times = trades_df['Holding Time (min)']
+        sns.boxplot(y=holding_times, ax=ax4, color='lightblue')
+        ax4.set_title('Trade Duration Distribution')
+        ax4.set_ylabel('Duration (minutes)')
+
+    # 5. Win/Loss Analysis by Month
+    ax5 = fig.add_subplot(gs[2, 1])
+    monthly_wins = trades_df[trades_df['% Return'] > 0].set_index('Entry Time').resample('M').size()
+    monthly_losses = trades_df[trades_df['% Return'] <= 0].set_index('Entry Time').resample('M').size()
+    
+    width = 0.35
+    months = range(len(monthly_wins))
+    ax5.bar(months, monthly_wins, width, label='Wins', color='green', alpha=0.6)
+    ax5.bar([x + width for x in months], monthly_losses, width, label='Losses', color='red', alpha=0.6)
+    ax5.set_title('Monthly Win/Loss Distribution')
+    ax5.set_xlabel('Month')
+    ax5.set_ylabel('Number of Trades')
+    ax5.legend()
+
+    plt.tight_layout()
+    return fig
+
+def display_enhanced_metrics(trades_df):
+    """
+    Displays enhanced trading metrics in a formatted way.
+    """
+    if trades_df.empty:
+        st.warning("No trades to analyze.")
+        return
+
+    # Calculate metrics
+    returns = trades_df['% Return'] if '% Return' in trades_df.columns else trades_df['Profit (%)']
+    profitable_trades = len(returns[returns > 0])
+    losing_trades = len(returns[returns <= 0])
+    total_trades = len(returns)
+    win_rate = (profitable_trades / total_trades * 100) if total_trades > 0 else 0
+    avg_win = returns[returns > 0].mean() if len(returns[returns > 0]) > 0 else 0
+    avg_loss = returns[returns < 0].mean() if len(returns[returns < 0]) > 0 else 0
+
+    # Display metrics in columns
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("Total Trades", total_trades)
+        st.metric("Win Rate", f"{win_rate:.2f}%")
+        st.metric("Profit Factor", f"{abs(avg_win/avg_loss):.2f}" if avg_loss != 0 else "∞")
+        
+    with col2:
+        st.metric("Profitable Trades", profitable_trades)
+        st.metric("Average Win", f"{avg_win:.2f}%")
+        st.metric("Best Trade", f"{returns.max():.2f}%")
+        
+    with col3:
+        st.metric("Losing Trades", losing_trades)
+        st.metric("Average Loss", f"{avg_loss:.2f}%")
+        st.metric("Worst Trade", f"{returns.min():.2f}%")
+
+# Add this to your run_backtest function:
+def enhanced_trade_analysis(trades_df, stats):
+    """
+    Performs enhanced trade analysis and displays results.
+    """
+    st.header("📊 Enhanced Trade Analysis")
+    
+    # Display enhanced metrics
+    display_enhanced_metrics(trades_df)
+    
+    # Create and display enhanced visualizations
+    try:
+        fig = plot_strategy_analysis(trades_df, stats)
+        st.pyplot(fig)
+    except Exception as e:
+        st.error(f"Error creating visualizations: {str(e)}")
+        
+    # Provide detailed trade data download
+    if not trades_df.empty:
+        csv = trades_df.to_csv(index=False)
+        st.download_button(
+            label="📥 Download Detailed Trade Analysis",
+            data=csv,
+            file_name="trade_analysis.csv",
+            mime="text/csv"
+        )
 
     # Add comparison summary download
     comparison_summary = pd.concat([
