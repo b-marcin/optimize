@@ -53,6 +53,7 @@ def verify_data_completeness(data, timeframe):
         - Number of gaps: {len(gap_starts)}
         - First missing: {missing[0]}
         - Last missing: {missing[-1]}
+        - Trading Days: {len(data.index.normalize().unique())}
         """)
         
         # Display gaps if there are any
@@ -69,6 +70,10 @@ def preprocess_data(data, timeframe):
     """
     Handles data preprocessing including gap filling and cleaning.
     """
+    # Convert index to datetime if not already
+    if not isinstance(data.index, pd.DatetimeIndex):
+        data.index = pd.to_datetime(data.index)
+    
     # Remove any duplicate indices
     data = data[~data.index.duplicated(keep='first')]
     
@@ -85,7 +90,6 @@ def preprocess_data(data, timeframe):
     data = data.dropna()
     
     return data
-
 def pine_crossover(a, b):
     """
     Matches PineScript's ta.crossover(source, ref).
@@ -119,28 +123,6 @@ async def fetch_symbol_data(
 ):
     """
     Enhanced fetch function with better error handling and data quality checks.
-    
-    Parameters:
-    -----------
-    exchange_name : str
-        Name of the exchange (e.g., 'binance', 'kraken')
-    symbol : str
-        Trading pair symbol (e.g., 'BTC/USDT')
-    timeframe : str
-        Candle timeframe (e.g., '1h', '4h', '1d')
-    length_max : int
-        Maximum lookback period for calculations
-    override_check : bool
-        Whether to override minimum data length check
-    max_retries : int
-        Maximum number of retry attempts for failed requests
-    backoff_factor : int
-        Factor to increase wait time between retries
-        
-    Returns:
-    --------
-    pd.DataFrame or None
-        Processed OHLCV data if successful, None otherwise
     """
     exchange_class = getattr(ccxt_async, exchange_name, None)
     if exchange_class is None:
@@ -153,7 +135,7 @@ async def fetch_symbol_data(
     })
 
     all_data = []
-    limit = 1000  # Maximum number of candles per request
+    limit = 1000
 
     try:
         st.write(f"Loading markets for {exchange_name}...")
@@ -168,7 +150,6 @@ async def fetch_symbol_data(
         await exchange.close()
         return None
 
-    # Set initial parameters for data fetching
     start_date = exchange.parse8601('2017-01-01T00:00:00Z')
     since = start_date
     max_timestamp = exchange.milliseconds()
@@ -178,13 +159,11 @@ async def fetch_symbol_data(
 
     while True:
         try:
-            # Fetch OHLCV data
             ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
             if not ohlcv:
                 st.write(f"No more data returned for {symbol}.")
                 break
 
-            # Check for duplicate or overlapping data
             if all_data and ohlcv[0][0] <= all_data[-1][0]:
                 st.warning(f"Duplicate or overlapping data for {symbol}.")
                 break
@@ -192,19 +171,16 @@ async def fetch_symbol_data(
             all_data.extend(ohlcv)
             latest_timestamp = ohlcv[-1][0]
             
-            # Progress update
             st.write(
                 f"Fetched {len(all_data)} candles for {symbol}. "
                 f"Latest date: {pd.to_datetime(latest_timestamp, unit='ms')}"
             )
 
-            # Prepare for next iteration
             since = latest_timestamp + 1
             if since > max_timestamp:
                 st.write(f"Reached current timestamp for {symbol}.")
                 break
 
-            # Respect exchange rate limits
             await asyncio.sleep(exchange.rateLimit / 1000)
 
         except ccxt.NetworkError as e:
@@ -241,8 +217,10 @@ async def fetch_symbol_data(
         Data Summary for {symbol}:
         - Time Range: {data.index.min()} to {data.index.max()}
         - Total Periods: {len(data)}
-        - Trading Days: {len(pd.Series(data.index.date).unique())}
+        - Trading Days: {len(data.index.normalize().unique())}
+
         """)
+
         
         # Verify completeness with enhanced reporting
         verify_data_completeness(data, timeframe)
@@ -900,20 +878,6 @@ def enhanced_trade_analysis(trades_df, stats):
             file_name="trade_analysis.csv",
             mime="text/csv"
         )
-
-    # Add comparison summary download
-    comparison_summary = pd.concat([
-        results_dict['4h'].assign(timeframe='4h'),
-        results_dict['1d'].assign(timeframe='1d')
-    ])
-    
-    csv_data = comparison_summary.to_csv(index=False)
-    st.download_button(
-        label="Download Complete Comparison Results",
-        data=csv_data,
-        file_name="timeframe_comparison_results.csv",
-        mime="text/csv"
-    )
 
 def plot_global_results(global_results_df):
     """
