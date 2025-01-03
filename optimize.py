@@ -272,52 +272,55 @@ def fetch_all_historical_data_cached(exchange_name, symbols, timeframe, length_m
         return run_concurrent_fetch(exchange_name, symbols, timeframe, length_max, override_check)
     
 async def fetch_stock_data(symbol, timeframe, length_max, override_check=False):
-    timeframe_mapping = {
-        '1m': '1m', '5m': '5m', '15m': '15m',
-        '30m': '30m', '1h': '1h', '4h': '4h', '1d': '1d'
+    # Define valid intervals and their maximum periods
+    interval_limits = {
+        '1m': '7d',
+        '2m': '60d',
+        '5m': '60d',
+        '15m': '60d',
+        '30m': '60d',
+        '60m': '60d',
+        '1h': '60d',
+        '1d': 'max',
+        '1wk': 'max',
+        '1mo': 'max'
     }
-    
-    yf_interval = timeframe_mapping.get(timeframe)
-    if not yf_interval:
-        st.error(f"Unsupported timeframe for stocks: {timeframe}")
-        return None
-    
+
     try:
         st.write(f"Fetching stock data for {symbol}...")
-        
-        periods = {
-            '1m': '7d', '5m': '60d', '15m': '60d',
-            '30m': '60d', '1h': '730d', '4h': '730d',
-            '1d': '1825d'
-        }
-        
         ticker = yf.Ticker(symbol)
-        df = ticker.history(interval=yf_interval, period=periods[timeframe])
+        
+        # Validate interval
+        if timeframe not in interval_limits:
+            raise ValueError(f"Invalid interval: {timeframe}")
+        
+        # Get period based on interval constraints
+        period = interval_limits[timeframe]
+        
+        df = ticker.history(
+            period=period,
+            interval=timeframe,
+            auto_adjust=True,
+            prepost=True
+        )
         
         if df.empty:
-            st.warning(f"No data returned for {symbol}")
-            return None
+            raise ValueError(f"No data found for {symbol}")
             
-        df = df.rename(columns={
-            'Open': 'Open', 'High': 'High',
-            'Low': 'Low', 'Close': 'Close',
-            'Volume': 'Volume'
-        })
-        
+        df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
         df = preprocess_data(df, timeframe)
         verify_data_completeness(df, timeframe)
         
-        required_length = (length_max * 2) + 10
-        if len(df) < required_length and not override_check:
-            st.warning(f"Insufficient data for {symbol}: {len(df)} < {required_length} periods required")
+        if len(df) < (length_max * 2) + 10 and not override_check:
+            st.warning(f"Insufficient data: {len(df)} < {(length_max * 2) + 10} periods")
             return None
             
         return df
         
     except Exception as e:
-        st.error(f"Error fetching stock data for {symbol}: {str(e)}")
+        st.error(f"Error fetching {symbol}: {str(e)}")
         return None
-    
+
 # ----------------------------------------
 # STRATEGY IMPLEMENTATION
 # ----------------------------------------
