@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from io import BytesIO
 import asyncio
+import yfinance as yf
 
 warnings.filterwarnings("ignore")
 
@@ -260,7 +261,63 @@ def run_concurrent_fetch(exchange_name, symbols, timeframe, length_max, override
 
 @st.cache_data(show_spinner=True, ttl=86400)
 def fetch_all_historical_data_cached(exchange_name, symbols, timeframe, length_max, override_check=False):
-    return run_concurrent_fetch(exchange_name, symbols, timeframe, length_max, override_check)
+    if exchange_name.lower() == "stock":
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        tasks = [fetch_stock_data(s, timeframe, length_max, override_check) for s in symbols]
+        data_list = loop.run_until_complete(asyncio.gather(*tasks))
+        loop.close()
+        return data_list
+    else:
+        return run_concurrent_fetch(exchange_name, symbols, timeframe, length_max, override_check)
+    
+async def fetch_stock_data(symbol, timeframe, length_max, override_check=False):
+    timeframe_mapping = {
+        '1m': '1m', '5m': '5m', '15m': '15m',
+        '30m': '30m', '1h': '1h', '4h': '4h', '1d': '1d'
+    }
+    
+    yf_interval = timeframe_mapping.get(timeframe)
+    if not yf_interval:
+        st.error(f"Unsupported timeframe for stocks: {timeframe}")
+        return None
+    
+    try:
+        st.write(f"Fetching stock data for {symbol}...")
+        
+        periods = {
+            '1m': '7d', '5m': '60d', '15m': '60d',
+            '30m': '60d', '1h': '730d', '4h': '730d',
+            '1d': '1825d'
+        }
+        
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(interval=yf_interval, period=periods[timeframe])
+        
+        if df.empty:
+            st.warning(f"No data returned for {symbol}")
+            return None
+            
+        df = df.rename(columns={
+            'Open': 'Open', 'High': 'High',
+            'Low': 'Low', 'Close': 'Close',
+            'Volume': 'Volume'
+        })
+        
+        df = preprocess_data(df, timeframe)
+        verify_data_completeness(df, timeframe)
+        
+        required_length = (length_max * 2) + 10
+        if len(df) < required_length and not override_check:
+            st.warning(f"Insufficient data for {symbol}: {len(df)} < {required_length} periods required")
+            return None
+            
+        return df
+        
+    except Exception as e:
+        st.error(f"Error fetching stock data for {symbol}: {str(e)}")
+        return None
+    
 # ----------------------------------------
 # STRATEGY IMPLEMENTATION
 # ----------------------------------------
@@ -925,25 +982,32 @@ def main():
     
     st.sidebar.header("🔧 Configuration")
     
-    exchange_name = st.sidebar.selectbox(
-        "Select Exchange",
-        ["binance", "kraken", "bitfinex", "coinbasepro"]
+    market_type = st.sidebar.selectbox(
+        "Select Market Type",
+        ["Crypto", "Stock"]
     )
+    
+    if market_type == "Crypto":
+        exchange_name = st.sidebar.selectbox(
+            "Select Exchange",
+            ["binance", "kraken", "bitfinex", "coinbasepro"]
+        )
+        default_symbols = "BTC/USDT,ETH/USDT,SOL/USDT,AVAX/USDT"
+    else:
+        exchange_name = "stock"
+        default_symbols = "AAPL,MSFT,GOOGL,PLTR"
     
     symbols_input = st.sidebar.text_input(
         "Enter Symbols (comma-separated)",
-        "BTC/USDT,ETH/USDT,SOL/USDT,AVAX/USDT"
+        default_symbols
     )
     symbols = [s.strip().upper() for s in symbols_input.split(",")]
     
-    # Create tabs for different functionalities
     tab1, tab2 = st.tabs(["Single Timeframe Analysis", "Timeframe Comparison"])
     
     with tab1:
-        timeframe = st.sidebar.selectbox(
-            "Select Timeframe",
-            ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
-        )
+        timeframe_options = ["5m", "15m", "30m", "1h", "4h", "1d"] if market_type == "Stock" else ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
+        timeframe = st.sidebar.selectbox("Select Timeframe", timeframe_options)
         
         process_all = st.sidebar.checkbox("Process All Lengths (10-1000)")
         if not process_all:
@@ -961,7 +1025,7 @@ def main():
             
         override_check = st.sidebar.checkbox("Override Minimum Data Requirement?", value=False)
         
-        if st.sidebar.button("🚀 Run Single Timeframe Analysis"):
+        if st.sidebar.button(f"🚀 Run Single Timeframe Analysis ({market_type})"):
             run_backtest(
                 exchange_name,
                 symbols,
@@ -974,13 +1038,7 @@ def main():
     with tab2:
         st.header("4H vs 1D Timeframe Comparison")
         
-        comparison_info = """
-        This analysis will compare performance metrics between 4H and 1D timeframes for all selected symbols.
-        It provides both aggregate statistics and individual symbol comparisons.
-        """
-        st.info(comparison_info)
-        
-        if st.button("🔄 Run Timeframe Comparison"):
+        if st.button(f"🔄 Run Timeframe Comparison ({market_type})"):
             length_max = 1000 if process_all else length_max
             results = compare_timeframes(
                 exchange_name,
@@ -993,7 +1051,6 @@ def main():
             if results and all(not df.empty for df in results.values()):
                 plot_timeframe_comparison(results)
                 
-                # Allow downloading comparison results
                 for tf in ['4h', '1d']:
                     if tf in results:
                         csv_data = results[tf].to_csv(index=False)
